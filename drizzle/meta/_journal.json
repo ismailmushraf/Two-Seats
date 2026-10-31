@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1793280471351,
+      "tag": "0000_salty_sunfire",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1793285157443,
+      "tag": "0001_swift_doctor_spectrum",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1793295132899,
+      "tag": "0002_confused_warbird",
+      "breakpoints": true
+    }
+  ]
+}

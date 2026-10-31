@@ -1,0 +1,13 @@
+Two Seats local media compatibility
+
+libav-wasm 0.8.12, unmodified decoder/worker assets from the npm package.
+Upstream source and build scripts:
+https://github.com/banou26/libav-wasm/tree/b182433251b3a29e721dffd1ae7715113df818c9
+
+The WebAssembly decoder is built using FFmpeg 7.1 and Emscripten.
+FFmpeg licensing information: https://ffmpeg.org/legal.html
+FFmpeg 7.1 source: https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz
+FFmpeg is a trademark of Fabrice Bellard, originator of the FFmpeg project.
+
+The decoder and worker are self-hosted. Local movie bytes are supplied through
+File.slice() in bounded chunks; no movie upload or third-party decoder CDN is used.

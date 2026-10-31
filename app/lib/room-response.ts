@@ -1,0 +1,4 @@
+export function roomResponse(r:any,uid:string,events:any[],now=Date.now()) {
+ const role=uid===r.owner?'owner':'guest';
+ return {id:r.id,role,stateVersion:r.state_version||0,serverNow:now,command:r.command,expires:r.expires,playing:!!r.playing,position:r.position,revision:r.revision,updated:r.updated,match:!!r.owner_media&&r.owner_media===r.guest_media,participants:[{role:'owner',present:true,online:now-r.owner_seen<15000,ready:!!r.owner_ready,loaded:!!r.owner_media,voice:!!r.owner_voice,voiceSession:r.owner_voice_session},{role:'guest',present:!!r.guest,online:now-r.guest_seen<15000,ready:!!r.guest_ready,loaded:!!r.guest_media,voice:!!r.guest_voice,voiceSession:r.guest_voice_session}],events:events.map(e=>({id:e.id,mine:e.sender===uid,type:e.type,payload:JSON.parse(e.payload),created:e.created}))};
+}

@@ -1,0 +1,1 @@
+ALTER TABLE `rooms` ADD `state_version` integer DEFAULT 0 NOT NULL;

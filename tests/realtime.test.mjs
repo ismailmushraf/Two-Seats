@@ -1,0 +1,8 @@
+import {readFileSync} from 'node:fs';import ts from 'typescript';import assert from 'node:assert/strict';
+async function load(file){const js=ts.transpileModule(readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.ES2022,target:ts.ScriptTarget.ES2022}}).outputText;return import('data:text/javascript;base64,'+Buffer.from(js).toString('base64'))}
+const {ReactionInbox}=await load('app/lib/reactions.ts');const inbox=new ReactionInbox();
+const a={id:'a'.repeat(32),emoji:'❤️'},b={id:'b'.repeat(32),emoji:'❤️'};
+assert(inbox.accept(a));assert(inbox.accept(b),'Simultaneous identical emojis are distinct events');assert.equal(inbox.accept(a),null,'Server fallback does not duplicate a peer-delivered reaction');assert.equal(inbox.accept({id:'bad',emoji:'❤️'}),null);assert.equal(inbox.accept({id:'c'.repeat(32),emoji:'<script>'}),null);
+const {microphoneIssue}=await load('app/lib/microphone.ts');const mac={secure:true,embedded:false,policy:true,platform:'Macintosh Chrome'};
+assert.equal(microphoneIssue('NotAllowedError',mac).code,'mic_denied');assert(microphoneIssue('NotAllowedError',mac).steps.some(s=>s.includes('macOS')));assert.equal(microphoneIssue('NotFoundError',mac).code,'mic_missing');assert.equal(microphoneIssue('NotReadableError',mac).code,'mic_busy');assert.equal(microphoneIssue('NotAllowedError',{...mac,policy:false,embedded:true}).code,'mic_context');assert.equal(microphoneIssue('NotAllowedError',{...mac,secure:false}).code,'mic_context');
+console.log('PASS: simultaneous reaction IDs preserved and duplicate transports suppressed; denied, missing, busy, insecure and iframe-blocked microphones produce distinct guidance.');

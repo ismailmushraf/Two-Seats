@@ -1,0 +1,16 @@
+import {readFileSync} from 'node:fs';import ts from 'typescript';import assert from 'node:assert/strict';
+const js=ts.transpileModule(readFileSync('app/lib/playback-controls.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.ES2022,target:ts.ScriptTarget.ES2022}}).outputText;
+const {capturePlaybackIntent,commitPlaybackIntent}=await import('data:text/javascript;base64,'+Buffer.from(js).toString('base64'));
+const video={currentTime:25.125,paused:false,pause(){this.paused=true}};
+const pause=capturePlaybackIntent(video,false);assert(video.paused,'Pause must happen synchronously at the tap');assert.equal(pause.position,25125);
+let release;const deferred=new Promise(resolve=>release=resolve);const sent=[];
+const pending=commitPlaybackIntent(pause,7,{async send(intent,revision){sent.push({...intent,revision});if(sent.length===1){await deferred;throw Object.assign(new Error('Conflict'),{status:409})}return {...intent,revision:9,updated:2000,serverNow:2000}},async refresh(){return {revision:8,playing:true,position:26000,updated:1000,serverNow:2000,command:'play'}},async accept(){}});
+assert(video.paused,'No network response is needed to stop the local movie');video.currentTime=99;release();await pending;assert.deepEqual(sent.map(x=>x.position),[25125,25125],'A retry must use the tap position, never a later currentTime');
+let calls=0;const alreadyPaused={revision:11,playing:false,position:70000,updated:2000,serverNow:2100,command:'pause'};
+const result=await commitPlaybackIntent({playing:false,position:70500,command:'pause'},10,{async send(){calls++;throw Object.assign(new Error('Conflict'),{status:409})},async refresh(){return alreadyPaused},async accept(){}});assert.equal(result.position,70000);assert.equal(calls,1,'A simultaneous pause must not issue another position-changing write');
+const rebase=[];
+await commitPlaybackIntent({playing:false,position:2000,command:'pause'},12,{async send(intent,revision){rebase.push({...intent,revision});if(rebase.length===1)throw Object.assign(new Error('Conflict'),{status:409});return {...intent,revision:14,updated:3200,serverNow:3200}},async refresh(){return {revision:13,playing:true,position:90000,updated:3000,serverNow:3200,command:'seek'}},async accept(){}});assert.equal(rebase[1].position,90200,'An old pause must not rewind a newer seek');
+const seek=capturePlaybackIntent(video,false,45000,'seek');assert.equal(seek.command,'seek');assert.equal(seek.position,45000);assert(video.paused);
+const playing=capturePlaybackIntent(video,true,50000);assert.equal(playing.command,'play');assert.equal(playing.position,50000);
+const failingVideo={currentTime:12,paused:false,pause(){this.paused=true}};const failingPause=capturePlaybackIntent(failingVideo,false);await assert.rejects(commitPlaybackIntent(failingPause,1,{async send(){throw new Error('offline')},async refresh(){throw new Error('should not run')},async accept(){}}));assert(failingVideo.paused,'A network failure must not restart playback');
+console.log('PASS: pause is synchronous; delayed/conflicting requests preserve the tap frame; simultaneous pauses do not move it; newer seeks are preserved; play and explicit seek semantics remain intact; network failure leaves local playback paused.');
