@@ -1,0 +1,11 @@
+'use client';
+import {useEffect,useRef,useState} from 'react';
+import {createPortal} from 'react-dom';
+import {Headphones,Phone,PhoneOff} from 'lucide-react';
+export function IncomingCallDialog({onAccept,onDecline}:{onAccept:()=>void;onDecline:()=>void}){
+ const [target,setTarget]=useState<Element|null>(null),panel=useRef<HTMLDivElement>(null),accept=useRef<HTMLButtonElement>(null),decline=useRef(onDecline);decline.current=onDecline;
+ useEffect(()=>{const update=()=>setTarget(document.fullscreenElement||document.body);update();document.addEventListener('fullscreenchange',update);return()=>document.removeEventListener('fullscreenchange',update)},[]);
+ useEffect(()=>{if(!target)return;const previous=document.activeElement;accept.current?.focus();const key=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.preventDefault();decline.current()}if(event.key==='Tab'){const buttons=panel.current?.querySelectorAll('button');if(!buttons?.length)return;const first=buttons[0],last=buttons[buttons.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus()}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus()}}};document.addEventListener('keydown',key);return()=>{document.removeEventListener('keydown',key);if(previous instanceof HTMLElement&&previous.isConnected)previous.focus()}},[target]);
+ if(!target)return null;
+ return createPortal(<div className="incoming-call-shade"><div ref={panel} className="incoming-call-dialog" role="alertdialog" aria-modal="true" aria-labelledby="incoming-call-title" aria-describedby="incoming-call-description"><span className="eyebrow">A VOICE FROM THE NEXT SEAT</span><div className="call-emblem"><Headphones size={32}/></div><h2 id="incoming-call-title">Your person is calling.</h2><p id="incoming-call-description">Join them for a voice call?<br/>Your microphone stays muted until you tap it on.</p><div className="call-actions"><button className="secondary" onClick={onDecline}><PhoneOff size={18}/>Decline</button><button ref={accept} className="primary" onClick={onAccept}><Phone size={18}/>Accept call</button></div><small>Only people in this private room can call.</small></div></div>,target);
+}

@@ -10,10 +10,10 @@ if(process.argv.includes('--clean')){
 }else{
  if(existsSync(route)&&!readFileSync(route,'utf8').startsWith(marker))throw new Error('Media QA route already exists');
  mkdirSync('app/media-qa',{recursive:true});mkdirSync(assets,{recursive:true});
- writeFileSync(route,marker+readFileSync(process.argv.includes('--long')?'tests/media/long-session-qa-page.tsx':process.argv.includes('--connection')?'tests/media/connection-qa-page.tsx':process.argv.includes('--pgs')?'tests/media/pgs-qa-page.tsx':process.argv.includes('--auth')?'tests/media/auth-qa-page.tsx':process.argv.includes('--features')?'tests/media/feature-qa-page.tsx':'tests/media/qa-page.tsx','utf8').replaceAll("from '../../app/lib/","from '../lib/").replaceAll("from '../../app/components/","from '../components/").replaceAll("from '../../app/page'","from '../page'"));
+ writeFileSync(route,marker+readFileSync(process.argv.includes('--calls')?'tests/media/call-qa-page.tsx':process.argv.includes('--long')?'tests/media/long-session-qa-page.tsx':process.argv.includes('--connection')?'tests/media/connection-qa-page.tsx':process.argv.includes('--pgs')?'tests/media/pgs-qa-page.tsx':process.argv.includes('--auth')?'tests/media/auth-qa-page.tsx':process.argv.includes('--features')?'tests/media/feature-qa-page.tsx':'tests/media/qa-page.tsx','utf8').replaceAll("from '../../app/lib/","from '../lib/").replaceAll("from '../../app/components/","from '../components/").replaceAll("from '../../app/page'","from '../page'"));
  for(const file of ['worker.js','worker-fallback.js'])copyFileSync(`tests/media/${file}`,`${assets}/${file}`);
  function ff(...args){const run=spawnSync('ffmpeg',['-hide_banner','-loglevel','error',...args],{stdio:'inherit'});if(run.status!==0)throw new Error('Fixture generation failed');}
- if(process.argv.includes('--connection')){console.log('Open /media-qa for simulated network and voice recovery checks.');process.exit(0)}
+ if(process.argv.includes('--connection')||process.argv.includes('--calls')){console.log('Open /media-qa for simulated network and voice recovery checks.');process.exit(0)}
  if(process.argv.includes('--long')){
   ff('-f','lavfi','-i','testsrc2=size=160x90:rate=2','-f','lavfi','-i','sine=frequency=440:sample_rate=48000','-t','2400','-c:v','libx264','-preset','ultrafast','-g','4','-c:a','ac3','-b:a','96k','-y',`${assets}/long.mkv`);
   console.log('Open /media-qa for accelerated sequential processing of a 40-minute movie.');process.exit(0);

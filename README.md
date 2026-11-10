@@ -102,3 +102,11 @@ The interface uses a cream marquee, burgundy velvet curtains, brass accents and 
 Browser checks covered 320px and 390px layouts, a 1200px desktop layout, reaction-picker persistence and expanded viewing. At the narrowest tested layout all player buttons measured at least 44px in each dimension with no page overflow. All forty existing named application functions were compared with the prior source and remained unchanged. Playback, voice and recovery regressions and TypeScript checks passed. Temporary mock-auth preview routes are excluded from production.
 
 ![Vintage mobile lobby and joined-room previews](docs/vintage-mobile-preview.png)
+
+## Voice call invitations
+
+Enable voice sends your partner an in-room Accept / Decline dialog, including in the expanded player. Microphone capture starts only from that person's own tap; accepted calls start muted. Calling from both devices together counts as mutual consent and the owner makes a single WebRTC offer. The caller can cancel, and an unanswered invitation times out after 60 seconds while the tab is active. Invitations require both people to have the room open.
+
+Acceptance and decline target a specific call session. Atomic server guards reject expired or already accepted invitations; cancellation tombstones prevent delayed requests from reviving canceled calls. Retry, microphone permission, speech ducking and ICE recovery continue through the existing voice connection.
+
+Validation: `node tests/room.test.mjs` covers invitation consent and races. `node tests/prepare-media-qa.mjs --calls` provides two real player UIs with synthetic microphones and shared simulated signaling; remove the generated route with `--clean` before building. This fixture checks UI behavior, not real cross-network audio delivery.

@@ -57,13 +57,34 @@ async function handle(req:Request,write:boolean){try{
  }else if(action==='diagnostic'){
  const codes=['mic_context','mic_denied','mic_missing','mic_busy','mic_stopped','mic_allowed','relay_ready','relay_failed','rtc_failed','rtc_recovering','rtc_connected','audio_blocked','waiting_peer'];if(!codes.includes(b.code))fail('Invalid diagnostic code.');
  console.info('voice_diagnostic',{role,code:b.code});return json({ok:true});
+ }else if(action==='decline-call'){
+ const session=b.session;if(!validId(session))fail('Invalid call invitation.');
+ const peer=role==='owner'?'guest':'owner';
+ const guard=`id=? AND ${peer}_voice=1 AND ${peer}_voice_session=? AND ${role}_voice=0`;
+ const out=await db.batch([
+ db.prepare(`INSERT INTO events(room,sender,type,payload,created) SELECT id,?,'call-declined',?,? FROM rooms WHERE ${guard}`).bind(uid,JSON.stringify({toSession:session}),now,id,session),
+ db.prepare(`UPDATE rooms SET ${peer}_voice=0,${peer}_voice_session=NULL,state_version=state_version+1 WHERE ${guard}`).bind(id,session),
+ ]);
+ if(!out[1].meta.changes)fail('That call invitation has ended or was already accepted.',409);
  }else if(action==='voice'){
  if(typeof b.enabled!=='boolean')fail('Invalid voice state.');
  const session=b.session;if(session!=null&&!validId(session))fail('Invalid voice session.');
- if(b.enabled){await db.prepare(`UPDATE rooms SET ${role}_voice=1,${role}_voice_session=?,state_version=state_version+1 WHERE id=?`).bind(session||crypto.randomUUID().replaceAll('-',''),id).run();}
- else if(!session||session===r[role+'_voice_session']){
  const peer=role==='owner'?'guest':'owner';
- await db.batch([db.prepare('INSERT INTO events(room,sender,type,payload,created) VALUES (?,?,?,?,?)').bind(id,uid,'hangup',JSON.stringify({fromSession:r[role+'_voice_session'],toSession:r[peer+'_voice_session'],data:null}),now),db.prepare(`UPDATE rooms SET ${role}_voice=0,${role}_voice_session=NULL,state_version=state_version+1 WHERE id=?`).bind(id)]);
+ if(b.enabled){
+ const next=session||crypto.randomUUID().replaceAll('-','');
+ if(b.acceptSession!=null&&!validId(b.acceptSession))fail('Invalid call invitation.');
+ // Cancellation is a tombstone for this attempt, even if it reaches the server before enable.
+ const accepted=b.acceptSession!=null?` AND ${peer}_voice=1 AND ${peer}_voice_session=? AND ${peer}_seen>?`:'';
+ const args:any[]=[next,id,id,uid,JSON.stringify(next)];if(b.acceptSession!=null)args.push(b.acceptSession,now-15000);
+ const out=await db.prepare(`UPDATE rooms SET ${role}_voice=1,${role}_voice_session=?,state_version=state_version+1 WHERE id=? AND NOT EXISTS (SELECT 1 FROM events WHERE room=? AND sender=? AND type='voice-cancel' AND payload=?)${accepted}`).bind(...args).run();
+ if(!out.meta.changes)fail('That call was canceled or the invitation has ended.',409);
+ }else{
+ const guard=`id=? AND (? IS NULL OR ${role}_voice_session=?)`;
+ const statements=[];
+ if(session)statements.push(db.prepare("INSERT INTO events(room,sender,type,payload,created) VALUES (?,?,?,?,?)").bind(id,uid,'voice-cancel',JSON.stringify(session),now));
+ statements.push(db.prepare(`INSERT INTO events(room,sender,type,payload,created) SELECT id,?,'hangup',json_object('fromSession',${role}_voice_session,'toSession',${peer}_voice_session,'data',NULL),? FROM rooms WHERE ${guard}`).bind(uid,now,id,session||null,session||null));
+ statements.push(db.prepare(`UPDATE rooms SET ${role}_voice=0,${role}_voice_session=NULL,state_version=state_version+1 WHERE ${guard}`).bind(id,session||null,session||null));
+ await db.batch(statements);
  }
  }else if(action==='event'){
  if(!['offer','answer','ice','restart','hangup','reaction','buffer'].includes(b.type))fail('Unknown room event.');

@@ -50,6 +50,42 @@ await post('owner',{action:'event',id:room.id,type:'reaction',payload:'<script>'
 await post('outsider',{action:'event',id:room.id,type:'reaction',payload:'❤️'},403);
 await post('guest',{action:'media',id:room.id,media:m.replace('123456','654321')});state=await post('guest',{action:'ready',id:room.id});assert(!state.match);
 await post('owner',{action:'control',id:room.id,revision:state.revision,position:0,playing:true},400);
+// Call invitations share the existing session-scoped signaling, with atomic consent guards.
+const callRoom=await post('caller',{action:'create'}),callId=callRoom.id;
+await post('callee',{action:'join',id:callId,token:callRoom.token});
+const callA='1'.repeat(32),callB='2'.repeat(32),callC='3'.repeat(32);
+await post('caller',{action:'voice',id:callId,enabled:true,session:callA});
+await post('outsider',{action:'decline-call',id:callId,session:callA},403);
+await post('callee',{action:'decline-call',id:callId,session:'bad'},400);
+await post('callee',{action:'voice',id:callId,enabled:true,session:callB,acceptSession:callC},409);
+let callState=await post('callee',{action:'decline-call',id:callId,session:callA});
+assert(!callState.participants[0].voice);
+assert(callState.events.some(e=>e.type==='call-declined'&&e.payload.toSession===callA));
+await post('callee',{action:'decline-call',id:callId,session:callA},409);
+await post('callee',{action:'voice',id:callId,enabled:true,session:callB,acceptSession:callA},409);
+await post('caller',{action:'voice',id:callId,enabled:true,session:callC});
+await post('callee',{action:'decline-call',id:callId,session:callA},409);
+await post('callee',{action:'voice',id:callId,enabled:true,session:callB,acceptSession:callC});
+await post('callee',{action:'decline-call',id:callId,session:callC},409);
+assert((await get('caller',callId)).participants.every(p=>p.voice));
+await post('caller',{action:'voice',id:callId,enabled:false,session:callC});
+await post('callee',{action:'voice',id:callId,enabled:false,session:callB});
+const canceled='4'.repeat(32);
+await post('caller',{action:'voice',id:callId,enabled:false,session:canceled});
+await post('caller',{action:'voice',id:callId,enabled:true,session:canceled},409);
+await Promise.all([post('caller',{action:'voice',id:callId,enabled:true,session:'5'.repeat(32)}),post('callee',{action:'voice',id:callId,enabled:true,session:'6'.repeat(32)})]);
+assert((await get('caller',callId)).participants.every(p=>p.voice));
+await post('caller',{action:'voice',id:callId,enabled:false,session:canceled});
+assert((await get('caller',callId)).participants.every(p=>p.voice),'A delayed cancellation cannot end a newer call');
+const invitationCode=ts.transpileModule(readFileSync('app/lib/call-invitations.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;
+const {incomingCall}=await import('data:text/javascript;base64,'+Buffer.from(invitationCode).toString('base64'));
+const people=[{role:'owner',voice:false,online:true},{role:'guest',voice:true,online:true,voiceSession:callA}];
+assert.equal(incomingCall(people,'owner',false,new Set()),callA);
+assert.equal(incomingCall(people,'owner',true,new Set()),null,'Crossed calls already have consent');
+assert.equal(incomingCall(people,'owner',false,new Set([callA])),null);
+assert.equal(incomingCall(people.map(p=>({...p,online:false})),'owner',false,new Set()),null);
+console.log('PASS: call invitations, accept/decline consent, crossed calls, cancellation tombstones and stale responses.');
+
 // Voice messages are scoped to the current attempt on both devices.
 const voiceA='c'.repeat(32),voiceB='d'.repeat(32),voiceNew='e'.repeat(32);
 await post('owner',{action:'voice',id:room.id,enabled:true,session:voiceA});
