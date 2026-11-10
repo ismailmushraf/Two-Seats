@@ -31,3 +31,6 @@ export async function readApiResponse(response:Response):Promise<any>{
  if(!response.ok)throw new ApiResponseError(typeof data?.error==='string'?data.error:'Could not connect. Please retry.',response.status);
  return data;
 }
+
+/** A failed network probe cannot revoke an already verified identity. Explicit auth failures can. */
+export function keepVerifiedSession(verified:boolean,error:unknown){return verified&&!(error instanceof ApiResponseError&&error.code==='auth');}

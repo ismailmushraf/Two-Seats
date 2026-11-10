@@ -58,6 +58,10 @@ await post('owner',{action:'event',id:room.id,type:'offer',payload:{fromSession:
 await post('owner',{action:'event',id:room.id,type:'ice',payload:{fromSession:voiceA,toSession:voiceB,data:{candidate:'test-candidate'}}});
 await post('owner',{action:'voice',id:room.id,enabled:true,session:voiceNew});
 await post('owner',{action:'event',id:room.id,type:'offer',payload:{fromSession:voiceA,toSession:voiceB,data:{type:'offer',sdp:'v=0'}}},409);
+await post('guest',{action:'event',id:room.id,type:'restart',payload:{fromSession:voiceB,toSession:voiceNew,data:null}});
+await post('guest',{action:'event',id:room.id,type:'restart',payload:{fromSession:voiceB,toSession:voiceA,data:null}},409);
+await post('outsider',{action:'event',id:room.id,type:'restart',payload:{fromSession:voiceB,toSession:voiceNew,data:null}},403);
+await post('guest',{action:'event',id:room.id,type:'restart',payload:{fromSession:voiceB,toSession:voiceNew,data:'bad'}},400);
 state=await post('owner',{action:'voice',id:room.id,enabled:false,session:voiceA});
 assert(state.participants[0].voice);assert.equal(state.participants[0].voiceSession,voiceNew);
 state=await post('owner',{action:'voice',id:room.id,enabled:false,session:voiceNew});assert(!state.participants[0].voice);

@@ -1,4 +1,5 @@
 /** Local, incremental audio conversion. The existing video remains the playback clock. */
+import { appendWithEviction } from './media-buffer';
 import type {PgsFrame} from './pgs';
 import type { makeRemuxer } from 'libav-wasm';
 import { MovieSubtitles, type SubtitleChoice } from './subtitles';
@@ -85,7 +86,7 @@ export async function openCompatibleMovie(
       try { check(); operation?.(); } catch (error) { cleanup(); reject(error); }
     });
   }
-  const append = async (data: ArrayBuffer) => { check(); if (data.byteLength) await event(buffer!, 'updateend', () => buffer!.appendBuffer(data)); };
+  const append = async (data: ArrayBuffer) => { check(); await appendWithEviction(data,()=>video.currentTime,()=>buffer!.buffered,bytes=>event(buffer!, 'updateend',()=>buffer!.appendBuffer(bytes)),remove); };
   const remove = async (start: number, end: number) => { check(); if (end > start) await event(buffer!, 'updateend', () => buffer!.remove(start, end)); };
   function seeking() {
     directSubtitles?.request(video.currentTime);

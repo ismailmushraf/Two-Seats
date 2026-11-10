@@ -1,7 +1,8 @@
 'use client';
 import { useEffect,useRef,useState } from 'react';
-import { readApiResponse, ApiResponseError, SessionRecovery } from './lib/api-response';
+import { readApiResponse, ApiResponseError, SessionRecovery, keepVerifiedSession } from './lib/api-response';
 import { parseRoomInvite } from './lib/invites';
+import { VoiceRecovery } from './lib/voice-recovery';
 import { playbackPlan } from './lib/playback';
 import { capturePlaybackIntent, commitPlaybackIntent } from './lib/playback-controls';
 import { ReactionInbox, reactionPacket } from './lib/reactions';
@@ -31,12 +32,13 @@ export default function Cinema(){
  async function checkSession(){
  if(sessionCheck.current)return;sessionCheck.current=true;const epoch=authEpoch.current;
  try{const res=await fetch('/api/session',{headers:{Accept:'application/json'},credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(12000)});const data=await readApiResponse(res);if(epoch!==authEpoch.current)return;if(!data.authenticated||!data.user?.email)throw new ApiResponseError('Sign in required.',401,'auth');const recovered=sessionRecovery.current.active;sessionRecovery.current.success();if(recoveryTimer.current)clearTimeout(recoveryTimer.current);recoveryTimer.current=null;everVerified.current=true;verifiedSession.current=true;setSession(data);setAuthStatus('verified');if(recovered){setError('');toast('Connection verified again. Press Play when you’re ready.')}}
- catch(e){if(epoch!==authEpoch.current)return;verificationFailed(e instanceof ApiResponseError&&e.code==='auth')}finally{sessionCheck.current=false}
+ catch(e){if(epoch!==authEpoch.current)return;if(keepVerifiedSession(verifiedSession.current,e)){if(recoveryTimer.current)clearTimeout(recoveryTimer.current);recoveryTimer.current=setTimeout(()=>{recoveryTimer.current=null;checkSession()},5000);return}verificationFailed(e instanceof ApiResponseError&&e.code==='auth')}finally{sessionCheck.current=false}
  }
  useEffect(()=>{checkSession();const interval=setInterval(checkSession,60000);const refresh=()=>{if(!document.hidden)checkSession()};document.addEventListener('visibilitychange',refresh);return()=>{clearInterval(interval);document.removeEventListener('visibilitychange',refresh)}},[]);
  const canUseRooms=authStatus==='verified'&&!!session?.roomService.available;
  const [room,setRoom]=useState<Room|null>(null),[roomId,setRoomId]=useState(''),[invite,setInvite]=useState(''),[joinInput,setJoinInput]=useState(''),[invited,setInvited]=useState(false),[busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[error,setError]=useState(''),[fileName,setFileName]=useState(''),[loadingFile,setLoadingFile]=useState(false),[duration,setDuration]=useState(0),[time,setTime]=useState(0),[expanded,setExpanded]=useState(false),[muted,setMuted]=useState(false),[voice,setVoice]=useState('off'),[talking,setTalking]=useState(false),[blocked,setBlocked]=useState(false),[help,setHelp]=useState(false),[reactionMenu,setReactionMenu]=useState(false),[floats,setFloats]=useState<{id:number;emoji:string;mine:boolean}[]>([]);
  const syncMemory=useRef({revision:-1,lastSeek:0,largeDrift:0}),bestRtt=useRef(Infinity),clockKnown=useRef(false),scrubbing=useRef(false),waitingTimer=useRef<ReturnType<typeof setTimeout>|null>(null),pendingControl=useRef<{playing:boolean;position?:number;command?:string}|null>(null),ownVoiceSession=useRef(''),peerVoiceSession=useRef(''),relayConfigured=useRef(false);
+ const voiceRecovery=useRef<VoiceRecovery|null>(null);
  const micOn=useRef(false),remoteVoiceStream=useRef<MediaStream|null>(null),movieAudio=useRef<VoiceMovieAudio|null>(null);
  function resumeMovieAudio(){if(video.current){movieAudio.current??=new VoiceMovieAudio(video.current,()=>[stream.current,remoteVoiceStream.current]);void movieAudio.current.resume()}}
  const mediaBusy=useRef(false),compatibleMovie=useRef<CompatibleMovie|null>(null),movieAbort=useRef<AbortController|null>(null),selectedMovie=useRef<File|null>(null);
@@ -67,11 +69,12 @@ export default function Cinema(){
  if(e.mine)continue;
  if(e.type==='reaction'){if(serverNow-e.created<8000){if(typeof e.payload==='string')addReaction(e.payload,false);else receiveReaction(e.payload)}continue}
  if(e.type==='buffer'){toast('Your partner paused while their movie catches up. Press play when both are ready.');continue}
- if(['offer','answer','ice','hangup'].includes(e.type))eventChain.current=eventChain.current.then(()=>handleEvent(e)).catch(()=>{setVoice('failed');setVoiceDetail('The voice handshake failed. Disconnect and enable voice on both devices again.');reportVoice('rtc_failed')});
+ if(['offer','answer','ice','hangup','restart'].includes(e.type))eventChain.current=eventChain.current.then(()=>handleEvent(e)).catch(()=>{if(pc.current&&ownVoiceSession.current===e.payload?.toSession&&peerVoiceSession.current===e.payload?.fromSession){talk(false);setVoiceDetail('Voice signaling was interrupted. Reconnecting…');voiceRecovery.current?.request(true)}});
  }
  }
  async function sendEvent(type:string,payload:any){const b=await api({action:'event',type,payload});await accept(b)}
  function stopVoice(update=true){
+ voiceRecovery.current?.stop();voiceRecovery.current=null;
  micOn.current=false;remoteVoiceStream.current=null;movieAudio.current?.monitor(false);if(audio.current){audio.current.pause();audio.current.srcObject=null}
  if(voiceTimeout.current)clearTimeout(voiceTimeout.current);voiceTimeout.current=null;rtcStarted.current=false;channel.current?.close();channel.current=null;if(connectionPing.current)clearInterval(connectionPing.current);connectionPing.current=null;setRoundTrip(null);setAudioBlocked(false);
  const session=ownVoiceSession.current;ownVoiceSession.current='';peerVoiceSession.current='';
@@ -93,37 +96,62 @@ export default function Cinema(){
  function armVoiceTimeout(p:RTCPeerConnection){
  if(rtcStarted.current)return;rtcStarted.current=true;setVoice('connecting');setVoiceDetail('Connecting your microphones…');
  if(voiceTimeout.current)clearTimeout(voiceTimeout.current);
- voiceTimeout.current=setTimeout(()=>{if(pc.current===p&&p.connectionState!=='connected'&&p.connectionState!=='closed'){setVoice('failed');setVoiceDetail('The call could not connect. Try voice again on both devices.');reportVoice('rtc_failed')}},45000);
+ voiceTimeout.current=setTimeout(()=>{if(pc.current===p&&p.connectionState!=='connected'&&p.connectionState!=='closed'){setVoiceDetail('The call is taking longer than expected. Retrying automatically…');voiceRecovery.current?.request(true)}},45000);
  }
  function buildPeer(servers:RTCIceServer[]){
+ voiceRecovery.current?.stop();voiceRecovery.current=null;
  talk(false);remoteVoiceStream.current=null;const previous=pc.current;pc.current=null;previous?.close();ice.current=[];rtcStarted.current=false;
  if(voiceTimeout.current)clearTimeout(voiceTimeout.current);voiceTimeout.current=null;
  const p=new RTCPeerConnection({iceServers:servers});pc.current=p;
+ const session=ownVoiceSession.current;
+ const recovery=new VoiceRecovery(async()=>{
+ if(pc.current!==p||ownVoiceSession.current!==session||!verifiedSession.current)return;
+ const peer=roomRef.current?.participants.find(person=>person.role!==roomRef.current?.role);
+ if(!peer?.voice||peer.voiceSession!==peerVoiceSession.current)return;
+ talk(false);setVoice('connecting');setVoiceDetail('Reconnecting voice automatically… Your mic stays muted.');reportVoice('rtc_recovering');
+ if(offerBusy.current)return;
+ offerBusy.current=true;
+ try{
+ let config=relayConfigCache.current;
+ if(!config||config.expiresAt<Date.now()+60000){config=await api({action:'voice-config'});relayConfigCache.current={...config,expiresAt:config.expiresAt||Date.now()+3600000}}
+ if(pc.current!==p||ownVoiceSession.current!==session||!verifiedSession.current)return;
+ p.setConfiguration({...p.getConfiguration(),iceServers:config.iceServers});
+ if(roomRef.current?.role!=='owner'){await sendVoice('restart',null);return}
+ if(p.signalingState==='have-local-offer')await p.setLocalDescription({type:'rollback'});
+ if(p.signalingState!=='stable')return;
+ const offer=await p.createOffer({iceRestart:true});if(pc.current!==p||ownVoiceSession.current!==session)return;
+ await p.setLocalDescription(offer);if(pc.current!==p||ownVoiceSession.current!==session)return;
+ await sendVoice('offer',{type:offer.type,sdp:offer.sdp});
+ }finally{offerBusy.current=false}
+ },()=>{if(pc.current===p){talk(false);setVoice('failed');setVoiceDetail('Voice could not reconnect. Tap Retry voice; your movie stays loaded.');reportVoice('rtc_failed')}});
+ voiceRecovery.current=recovery;
+ p.oniceconnectionstatechange=()=>{if(pc.current!==p)return;if(p.iceConnectionState==='connected'||p.iceConnectionState==='completed'){recovery.connected();setVoice('connected');setVoiceDetail('Connected. Tap the mic to turn it on; tap again to mute.');movieAudio.current?.monitor(true)}else if(p.iceConnectionState==='failed')recovery.request(true);else if(p.iceConnectionState==='disconnected')recovery.request()};
  for(const track of stream.current?.getTracks()||[])p.addTrack(track,stream.current!);
  if(roomRef.current?.role==='owner')bindChannel(p.createDataChannel('two-seats-reactions',{ordered:false,maxRetransmits:1}));
  else p.ondatachannel=e=>bindChannel(e.channel);
  p.onicecandidate=e=>{if(pc.current===p&&e.candidate)sendVoice('ice',e.candidate.toJSON()).catch(()=>{})};
  p.ontrack=e=>{if(pc.current===p&&audio.current){remoteVoiceStream.current=e.streams[0]||new MediaStream([e.track]);audio.current.srcObject=remoteVoiceStream.current;audio.current.play().catch(()=>{setAudioBlocked(true);reportVoice('audio_blocked')})}};
- p.onconnectionstatechange=()=>{if(pc.current!==p)return;if(p.connectionState==='connected'){if(voiceTimeout.current)clearTimeout(voiceTimeout.current);setVoice('connected');setVoiceDetail('Connected. Tap the mic to turn it on; tap again to mute.');reportVoice('rtc_connected')}if(p.connectionState!=='connected')talk(false);movieAudio.current?.monitor(p.connectionState==='connected');if(p.connectionState==='failed'){setVoice('failed');setVoiceDetail('The call connection failed. Tap Retry voice on both devices.');reportVoice('rtc_failed')}if(p.connectionState==='disconnected')setVoiceDetail('Voice connection interrupted. Waiting for recovery…')};
+ p.onconnectionstatechange=()=>{if(pc.current!==p)return;if(p.connectionState==='connected'){recovery.connected();if(voiceTimeout.current)clearTimeout(voiceTimeout.current);setVoice('connected');setVoiceDetail('Connected. Tap the mic to turn it on; tap again to mute.');reportVoice('rtc_connected')}if(p.connectionState!=='connected')talk(false);movieAudio.current?.monitor(p.connectionState==='connected');if(p.connectionState==='failed'){setVoiceDetail('Voice connection lost. Reconnecting…');recovery.request(true)}if(p.connectionState==='disconnected'){setVoiceDetail('Voice connection interrupted. Waiting for recovery…');recovery.request()}};
  return p;
  }
  async function handleEvent(e:any){if(e.mine)return;
  if(e.type==='reaction')addReaction(e.payload,false);
  if(e.type==='buffer'&&e.payload!==false)toast('Your partner paused while their movie catches up. Press play when both are ready.');
- if(!['offer','answer','ice','hangup'].includes(e.type))return;
+ if(!['offer','answer','ice','hangup','restart'].includes(e.type))return;
  const payload=e.payload;
  if(!ownVoiceSession.current||!payload||payload.toSession!==ownVoiceSession.current)return;
  const peer=roomRef.current?.participants.find(p=>p.role!==roomRef.current?.role);
  if(e.type==='hangup'){if(payload.fromSession===peerVoiceSession.current){stopVoice();toast('Your partner disconnected voice. Both can enable it again.')}return}
  if(payload.fromSession!==peer?.voiceSession||payload.fromSession!==peerVoiceSession.current||!pc.current)return;
  const p=pc.current;
+ if(e.type==='restart'){if(roomRef.current?.role==='owner')voiceRecovery.current?.request(true);return}
  if(e.type==='offer'){
- if(roomRef.current?.role!=='guest')return;armVoiceTimeout(p);
- await p.setRemoteDescription(payload.data);for(const c of ice.current)await p.addIceCandidate(c);ice.current=[];
+ if(roomRef.current?.role!=='guest')return;if(p.connectionState!=='connected')armVoiceTimeout(p);
+ await p.setRemoteDescription(payload.data);for(const c of ice.current)try{await p.addIceCandidate(c)}catch{}ice.current=[];
  const answer=await p.createAnswer();if(pc.current!==p)return;await p.setLocalDescription(answer);if(pc.current!==p)return;await sendVoice('answer',{type:answer.type,sdp:answer.sdp});
  }
- if(e.type==='answer'&&p.signalingState==='have-local-offer'){await p.setRemoteDescription(payload.data);for(const c of ice.current)await p.addIceCandidate(c);ice.current=[]}
- if(e.type==='ice'){if(p.remoteDescription)await p.addIceCandidate(payload.data);else ice.current.push(payload.data)}
+ if(e.type==='answer'&&p.signalingState==='have-local-offer'){await p.setRemoteDescription(payload.data);if(p.connectionState==='connected')voiceRecovery.current?.connected();for(const c of ice.current)try{await p.addIceCandidate(c)}catch{}ice.current=[]}
+ if(e.type==='ice'){if(p.remoteDescription){try{await p.addIceCandidate(payload.data)}catch{/* Late candidates from the previous ICE generation are harmless. */}}else if(ice.current.length<128)ice.current.push(payload.data)}
  }
  async function accept(b:Room){
  if(!b?.participants)return;if(roomRef.current?.id===b.id&&b.stateVersion<roomRef.current.stateVersion){ingestEvents(b.events,b.serverNow);return}
@@ -170,8 +198,9 @@ export default function Cinema(){
  if(!captureInvite()){try{const memberRoom=new URLSearchParams(location.search).get('room');const saved=memberRoom&&/^[a-f0-9]{32}$/.test(memberRoom)?{id:memberRoom}:JSON.parse(sessionStorage.getItem('two-seats-room')||'null');if(saved){setRoomId(saved.id);setInvite(saved.invite||'');api(undefined,saved.id).then(accept).catch(e=>setError(e.message))}}catch{}}
  const hashChanged=()=>{if(parseRoomInvite(location.href,location.origin)){lastAutoInvite.current='';captureInvite()}};
  window.addEventListener('hashchange',hashChanged);
+ const online=()=>{checkSession();if(pc.current&&pc.current.connectionState!=='connected')voiceRecovery.current?.request(true)};window.addEventListener('online',online);
  const release=()=>talk(false);const visibility=()=>{if(document.hidden){release();const r=roomRef.current;if(r?.playing)api({action:'control',playing:false,position:(video.current?.currentTime||0)*1000,revision:r.revision}).catch(()=>{})}};document.addEventListener('visibilitychange',visibility);
- return()=>{mounted.current=false;if(recoveryTimer.current)clearTimeout(recoveryTimer.current);movieAbort.current?.abort();compatibleMovie.current?.destroy();if(waitingTimer.current)clearTimeout(waitingTimer.current);window.removeEventListener('hashchange',hashChanged);release();stream.current?.getTracks().forEach(t=>t.stop());pc.current?.close();if(voiceTimeout.current)clearTimeout(voiceTimeout.current);if(connectionPing.current)clearInterval(connectionPing.current);if(urlRef.current)URL.revokeObjectURL(urlRef.current);movieAudio.current?.destroy();movieAudio.current=null;document.removeEventListener('visibilitychange',visibility)};
+ return()=>{mounted.current=false;voiceRecovery.current?.stop();window.removeEventListener('online',online);if(recoveryTimer.current)clearTimeout(recoveryTimer.current);movieAbort.current?.abort();compatibleMovie.current?.destroy();if(waitingTimer.current)clearTimeout(waitingTimer.current);window.removeEventListener('hashchange',hashChanged);release();stream.current?.getTracks().forEach(t=>t.stop());pc.current?.close();if(voiceTimeout.current)clearTimeout(voiceTimeout.current);if(connectionPing.current)clearInterval(connectionPing.current);if(urlRef.current)URL.revokeObjectURL(urlRef.current);movieAudio.current?.destroy();movieAudio.current=null;document.removeEventListener('visibilitychange',visibility)};
  },[]);
  useEffect(()=>{
  if(!canUseRooms||room||busy||joiningInvite.current)return;

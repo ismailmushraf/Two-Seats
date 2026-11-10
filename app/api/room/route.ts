@@ -55,7 +55,7 @@ async function handle(req:Request,write:boolean){try{
  if(!Array.isArray(config.iceServers)||!config.iceServers.some((s:any)=>[].concat(s.urls||[]).some((u:any)=>typeof u==='string'&&/^turns?:/.test(u))))fail('The voice relay returned an invalid configuration.',503);
  const result={iceServers:config.iceServers,relayConfigured:true,expiresAt:now+14400000};relayCache.set(cacheKey,{expires:now+13800000,config:result});if(relayCache.size>100)relayCache.delete(relayCache.keys().next().value!);return json(result);
  }else if(action==='diagnostic'){
- const codes=['mic_context','mic_denied','mic_missing','mic_busy','mic_stopped','mic_allowed','relay_ready','relay_failed','rtc_failed','rtc_connected','audio_blocked','waiting_peer'];if(!codes.includes(b.code))fail('Invalid diagnostic code.');
+ const codes=['mic_context','mic_denied','mic_missing','mic_busy','mic_stopped','mic_allowed','relay_ready','relay_failed','rtc_failed','rtc_recovering','rtc_connected','audio_blocked','waiting_peer'];if(!codes.includes(b.code))fail('Invalid diagnostic code.');
  console.info('voice_diagnostic',{role,code:b.code});return json({ok:true});
  }else if(action==='voice'){
  if(typeof b.enabled!=='boolean')fail('Invalid voice state.');
@@ -66,12 +66,13 @@ async function handle(req:Request,write:boolean){try{
  await db.batch([db.prepare('INSERT INTO events(room,sender,type,payload,created) VALUES (?,?,?,?,?)').bind(id,uid,'hangup',JSON.stringify({fromSession:r[role+'_voice_session'],toSession:r[peer+'_voice_session'],data:null}),now),db.prepare(`UPDATE rooms SET ${role}_voice=0,${role}_voice_session=NULL,state_version=state_version+1 WHERE id=?`).bind(id)]);
  }
  }else if(action==='event'){
- if(!['offer','answer','ice','hangup','reaction','buffer'].includes(b.type))fail('Unknown room event.');
+ if(!['offer','answer','ice','restart','hangup','reaction','buffer'].includes(b.type))fail('Unknown room event.');
  const payload=JSON.stringify(b.payload);if(!payload||payload.length>18000)fail('Event too large.');
  if(b.type==='reaction'&&!['❤️','😂','😱','🥹','👏','😘'].includes(b.payload)&&!reactionPacket(b.payload))fail('Unknown reaction.');
  if(b.type==='buffer'&&typeof b.payload!=='boolean'&&(!Number.isFinite(b.payload?.position)||b.payload.position<0||b.payload.position>86400000))fail('Invalid buffering state.');
- if(['offer','answer','ice'].includes(b.type)){
+ if(['offer','answer','ice','restart'].includes(b.type)){
  const peer=role==='owner'?'guest':'owner';
+ if(b.type==='restart'&&b.payload?.data!==null)fail('Invalid recovery request.');
  if(!r[role+'_voice']||!r[peer+'_voice']||b.payload?.fromSession!==r[role+'_voice_session']||b.payload?.toSession!==r[peer+'_voice_session'])fail('Voice session changed. Retry the connection.',409);
  if(['offer','answer'].includes(b.type)&&(b.payload.data?.type!==b.type||typeof b.payload.data?.sdp!=='string'))fail('Invalid voice handshake.');
  }

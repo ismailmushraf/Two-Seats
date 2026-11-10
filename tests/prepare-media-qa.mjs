@@ -10,9 +10,14 @@ if(process.argv.includes('--clean')){
 }else{
  if(existsSync(route)&&!readFileSync(route,'utf8').startsWith(marker))throw new Error('Media QA route already exists');
  mkdirSync('app/media-qa',{recursive:true});mkdirSync(assets,{recursive:true});
- writeFileSync(route,marker+readFileSync(process.argv.includes('--pgs')?'tests/media/pgs-qa-page.tsx':process.argv.includes('--auth')?'tests/media/auth-qa-page.tsx':process.argv.includes('--features')?'tests/media/feature-qa-page.tsx':'tests/media/qa-page.tsx','utf8').replaceAll("from '../../app/lib/","from '../lib/").replaceAll("from '../../app/components/","from '../components/").replaceAll("from '../../app/page'","from '../page'"));
+ writeFileSync(route,marker+readFileSync(process.argv.includes('--long')?'tests/media/long-session-qa-page.tsx':process.argv.includes('--connection')?'tests/media/connection-qa-page.tsx':process.argv.includes('--pgs')?'tests/media/pgs-qa-page.tsx':process.argv.includes('--auth')?'tests/media/auth-qa-page.tsx':process.argv.includes('--features')?'tests/media/feature-qa-page.tsx':'tests/media/qa-page.tsx','utf8').replaceAll("from '../../app/lib/","from '../lib/").replaceAll("from '../../app/components/","from '../components/").replaceAll("from '../../app/page'","from '../page'"));
  for(const file of ['worker.js','worker-fallback.js'])copyFileSync(`tests/media/${file}`,`${assets}/${file}`);
  function ff(...args){const run=spawnSync('ffmpeg',['-hide_banner','-loglevel','error',...args],{stdio:'inherit'});if(run.status!==0)throw new Error('Fixture generation failed');}
+ if(process.argv.includes('--connection')){console.log('Open /media-qa for simulated network and voice recovery checks.');process.exit(0)}
+ if(process.argv.includes('--long')){
+  ff('-f','lavfi','-i','testsrc2=size=160x90:rate=2','-f','lavfi','-i','sine=frequency=440:sample_rate=48000','-t','2400','-c:v','libx264','-preset','ultrafast','-g','4','-c:a','ac3','-b:a','96k','-y',`${assets}/long.mkv`);
+  console.log('Open /media-qa for accelerated sequential processing of a 40-minute movie.');process.exit(0);
+ }
  ff('-f','lavfi','-i','testsrc2=size=320x180:rate=24','-f','lavfi','-i','sine=frequency=440:sample_rate=48000','-t','32','-c:v','libx264','-preset','ultrafast','-pix_fmt','yuv420p','-g','48','-c:a','ac3','-b:a','192k','-y',`${assets}/ac3.mkv`);
  for(const [name,codec] of [['eac3','eac3'],['dts','dca'],['truehd','truehd']])ff('-i',`${assets}/ac3.mkv`,'-c:v','copy','-c:a',codec,'-strict','-2','-y',`${assets}/${name}.mkv`);
  ff('-i',`${assets}/ac3.mkv`,'-f','lavfi','-i','sine=frequency=880:sample_rate=48000','-map','0:v','-map','0:a','-map','1:a','-t','32','-c:v','copy','-c:a','ac3','-metadata:s:a:0','language=eng','-metadata:s:a:1','language=mal','-y',`${assets}/multi.mkv`);
