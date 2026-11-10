@@ -7,8 +7,9 @@ export function SubtitleOverlay({video,read,readBitmap}:{video:RefObject<HTMLVid
  useEffect(()=>{
   const scratch=document.createElement('canvas');let painted='';
   const update=()=>{
-   const v=video.current;setText(v?.src?latest.current.read(v.currentTime):'');
-   const layer=canvas.current;if(!layer||!v)return;const frame=v.src?latest.current.readBitmap?.(v.currentTime):null;
+   const v=video.current;let caption='',frame:PgsFrame|null|undefined=null;
+   try{if(v?.src){caption=latest.current.read(v.currentTime);frame=latest.current.readBitmap?.(v.currentTime)}}catch{/* Caption failures cannot interrupt the video or its clock. */}
+   setText(caption);const layer=canvas.current;if(!layer||!v)return;
    if(!frame){layer.hidden=true;painted='';return}
    const width=v.clientWidth,height=v.clientHeight,key=`${frame.id}:${width}:${height}`;
    if(!width||!height||key===painted)return;
@@ -26,7 +27,7 @@ export function SubtitleOverlay({video,read,readBitmap}:{video:RefObject<HTMLVid
      context.drawImage(scratch,part.crop.x,part.crop.y,part.crop.width,part.crop.height,left+part.x*sx,Math.max(0,top+part.y*sy-shift),part.crop.width*sx,part.crop.height*sy);
     }
     layer.hidden=false;painted=key;
-   }catch{layer.hidden=true;painted='';}
+   }catch{layer.hidden=true;painted=key;}
   };
   const timer=setInterval(update,80),v=video.current;
   for(const event of ['timeupdate','seeked','loadedmetadata','emptied'])v?.addEventListener(event,update);

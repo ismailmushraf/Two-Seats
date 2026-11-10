@@ -44,7 +44,9 @@ export async function openCompatibleMovie(
   if (!Source) throw new Error('This browser cannot run movie audio compatibility mode. Update your browser, or use an MP4 with H.264 video and AAC audio.');
   let remuxer: Remuxer | undefined, source: MediaSource | undefined, buffer: SourceBuffer | undefined;
   let closed = false, url = '', timer: ReturnType<typeof setInterval> | undefined;
-  let subtitles:MovieSubtitles|undefined;
+  let subtitles:MovieSubtitles|undefined,subtitleError='';
+  const addSubtitles=(packets:any[])=>{try{if(Array.isArray(packets))subtitles?.add(packets)}catch{subtitleError='A subtitle packet could not be decoded. Video playback is kept separate.'}};
+  const requestSubtitles=()=>{if(buffer&&(bufferedAhead(buffer.buffered,video.currentTime)>=3||finished))directSubtitles?.request(video.currentTime)};
   let directSubtitles:ReturnType<typeof createMatroskaSubtitleReader>=null;
   let pendingSeek: number | null = null, pumping = false, finished = false, trackChange = false;
   let pendingTrack: {index: number; resolve: () => void; reject: (error: unknown) => void} | undefined;
@@ -53,7 +55,7 @@ export async function openCompatibleMovie(
   const destroy = () => {
     if (closed) return;
     closed = true; abort.abort(); clearInterval(timer);
-    video.removeEventListener('seeking', seeking);
+    video.removeEventListener('seeking', seeking);source?.removeEventListener('sourceclose',sourceClosed);
     signal.removeEventListener('abort', destroy);
     pendingTrack?.reject(cancelled()); pendingTrack = undefined;
     subtitles?.destroy();
@@ -62,6 +64,7 @@ export async function openCompatibleMovie(
     remuxer?.worker.terminate();
     if (url) URL.revokeObjectURL(url);
   };
+  function sourceClosed(){if(!closed){video.pause();onError('The browser released this movie’s decoder. Both screens are paused. Use Repair sound / load subtitles to reload it.');destroy()}}
   signal.addEventListener('abort', destroy, {once: true});
   async function bounded<T>(promise: Promise<T>, message: string): Promise<T> {
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -89,14 +92,13 @@ export async function openCompatibleMovie(
   const append = async (data: ArrayBuffer) => { check(); await appendWithEviction(data,()=>video.currentTime,()=>buffer!.buffered,bytes=>event(buffer!, 'updateend',()=>buffer!.appendBuffer(bytes)),remove); };
   const remove = async (start: number, end: number) => { check(); if (end > start) await event(buffer!, 'updateend', () => buffer!.remove(start, end)); };
   function seeking() {
-    directSubtitles?.request(video.currentTime);
+    requestSubtitles();
     if (!buffer || closed) return;
     // Buffered seeks need no worker restart. Unbuffered seeks are serialized with reads/appends.
     if (bufferedAhead(buffer.buffered, video.currentTime) < 0.08) pendingSeek = video.currentTime;
     void pump();
   }
   async function pump() {
-    directSubtitles?.request(video.currentTime);
     if (closed || pumping || !buffer || !remuxer || !source || source.readyState === 'closed') return;
     pumping = true;
     try {
@@ -113,18 +115,19 @@ export async function openCompatibleMovie(
         // Keep known cues and read a little before a new target to recover captions
         // that started before its video keyframe. The video still seeks to the exact target.
         const chunk = await bounded(remuxer.seek(subtitles?.choices.length?Math.max(0,target-8):target),'This device could not seek the movie in time. Try an H.264/AAC MP4.'); check();
-        subtitles?.add(chunk.subtitles);
+        addSubtitles(chunk.subtitles);
         buffer.timestampOffset = chunk.pts;
         await append(chunk.data); finished = chunk.finished;
         if (pendingTrack) { pendingTrack.resolve(); pendingTrack = undefined; }
       } else if (!finished && bufferedAhead(buffer.buffered, video.currentTime) < 15) {
         const chunk = await bounded(remuxer.read(),'This device could not prepare the next part of the movie in time.'); check();
         // A seek requested while this read ran takes precedence over its output.
-        if (pendingSeek === null) { subtitles?.add(chunk.subtitles);await append(chunk.data); finished = chunk.finished; }
+        if (pendingSeek === null) { addSubtitles(chunk.subtitles);await append(chunk.data); finished = chunk.finished; }
       }
       if (video.currentTime > 15 && buffer.buffered.length && buffer.buffered.start(0) < video.currentTime - 15) {
         await remove(0, video.currentTime - 10);
       }
+      requestSubtitles();
       if (finished && pendingSeek === null && source.readyState === 'open' && !buffer.updating) source.endOfStream();
     } catch (error) {
       if (!closed) { video.pause(); onError(error instanceof Error ? error.message : 'Movie audio conversion failed.'); destroy(); }
@@ -152,7 +155,7 @@ export async function openCompatibleMovie(
     const codecs = [header.info.output.videoMimeType, header.info.output.audioMimeType].filter(Boolean).join(',');
     const mime = `video/mp4; codecs="${codecs}"`;
     if (!header.info.output.videoMimeType || !Source.isTypeSupported(mime)) throw new Error('This device cannot decode the video in this file. Audio repair cannot convert video; use an MP4 with H.264 video and AAC audio.');
-    source = new Source();
+    source = new Source();source.addEventListener('sourceclose',sourceClosed);
     // Required by ManagedMediaSource on iPhone when no AirPlay source is supplied.
     video.disableRemotePlayback = true;
     url = URL.createObjectURL(source);
@@ -161,18 +164,21 @@ export async function openCompatibleMovie(
     const trackInfo=await trackInfoPromise;check();
     const subtitleInfo=trackInfo.filter(track=>track.type===17);
     subtitles=new MovieSubtitles(video,header.subtitles.map((subtitle,index)=>({...subtitle,codec:(trackInfo[subtitle.streamIndex]?.type===17?trackInfo[subtitle.streamIndex]:subtitleInfo[index])?.codec||''})));
-    directSubtitles=createMatroskaSubtitleReader(file,trackInfo,packets=>subtitles?.add(packets),signal);
-    directSubtitles?.selectPgs(subtitles.choices[0]?.streamIndex??null);directSubtitles?.request(0);
+    directSubtitles=createMatroskaSubtitleReader(file,trackInfo,packets=>addSubtitles(packets),signal);
+    directSubtitles?.selectPgs(subtitles.choices[0]?.streamIndex??null);
     await append(header.data);
-    const first = await bounded(remuxer.read(),'This device could not prepare the movie audio in time.'); check();subtitles.add(first.subtitles); await append(first.data); finished = first.finished;
+    const first = await bounded(remuxer.read(),'This device could not prepare the movie audio in time.'); check();addSubtitles(first.subtitles); await append(first.data); finished = first.finished;
+    // Build a small cushion before exposing Ready; subtitle scanning starts afterwards.
+    for(let count=0;!finished&&bufferedAhead(buffer.buffered,0)<3&&count<16;count++){const chunk=await bounded(remuxer.read(),'This device could not buffer the movie in time.');check();await append(chunk.data);addSubtitles(chunk.subtitles);finished=chunk.finished;}
+    requestSubtitles();
     if (video.readyState < 1) await event(video, 'loadedmetadata');
     video.addEventListener('seeking', seeking);
     timer = setInterval(() => void pump(), 200);
     return {
       url, duration, tracks: header.audioStreams, hasAudio: !!header.info.output.audioMimeType,
-      subtitles:subtitles.choices,selectSubtitles:index=>{subtitles?.select(index);directSubtitles?.selectPgs(index);directSubtitles?.request(video.currentTime)},
+      subtitles:subtitles.choices,selectSubtitles:index=>{subtitles?.select(index);directSubtitles?.selectPgs(index);requestSubtitles()},
       subtitleText:time=>subtitles?.caption(time)||'',subtitleBitmap:time=>subtitles?.bitmap(time)||null,subtitleCueCount:()=>subtitles?.cueCount||0,
-      subtitleDiagnostics:()=>({...subtitles?.diagnostics||{codec:'',received:0,rejected:0,inferred:0},readerError:subtitles?.diagnostics.pgsError||directSubtitles?.error||''}),
+      subtitleDiagnostics:()=>({...subtitles?.diagnostics||{codec:'',received:0,rejected:0,inferred:0},readerError:subtitles?.diagnostics.pgsError||subtitleError||directSubtitles?.error||''}),
       selectTrack: async index => {
         check();
         if (trackChange) throw new Error('Please wait for the previous audio track change.');

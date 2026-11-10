@@ -70,7 +70,7 @@ export function createMatroskaSubtitleReader(file:Blob,tracks:MatroskaTrack[],on
     packets.push({type:'dialogue',streamIndex:track.index,start,end:start+(duration||((track.defaultDuration||0)/1e6)),content});
    }catch(error){if(signal.aborted||closed)throw error;lastError=error instanceof Error?error.message:'This subtitle packet could not be decoded.';}
   }
-  if(packets.length){check();onPackets(packets.filter(packet=>packet.type!=='pgs'||packet.streamIndex===selectedPgs));}
+  if(packets.length){for(let at=0;at<packets.length;at+=8){check();onPackets(packets.slice(at,at+8).filter(packet=>packet.type!=='pgs'||packet.streamIndex===selectedPgs));await new Promise(resolve=>setTimeout(resolve,0));}}
  }
  async function window(time:number){
   if(!initialized)await initialize();if(!initialized)return;
@@ -88,7 +88,7 @@ export function createMatroskaSubtitleReader(file:Blob,tracks:MatroskaTrack[],on
    }
    scanPos=e.end;if(e.unknown)break;
   }
-  for(let i=0;i<index.length;i++){check();const cluster=index[i],next=index[i+1]?.time??Infinity;if(cluster.time<=to&&next>=from)await parseCluster(cluster);}
+  for(let i=0;i<index.length;i++){check();const cluster=index[i],next=index[i+1]?.time??Infinity;if(cluster.time<=to&&next>=from){await new Promise(resolve=>setTimeout(resolve,0));await parseCluster(cluster);}}
   if(selectedPgs!==null){pgsWindow={start:from,end:to};onPackets(pgsStreams.map(streamIndex=>({type:'pgs-window-end',streamIndex,start:from,end:to})));}else loaded.push({start:from,end:to});
  }
  async function run(){if(running)return;running=true;try{while(requested!==null&&!closed){const time=requested;requested=null;await window(time);}}catch{/* This independent subtitle path must never interrupt audio/video. */}finally{running=false;}}

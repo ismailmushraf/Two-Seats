@@ -42,6 +42,8 @@ const outcomes=await Promise.all([commitPlaybackIntent({playing:false,position:8
 assert.equal(outcomes[0].position,outcomes[1].position);assert(!outcomes[0].playing);state=await get('owner',room.id);const pausedRevision=state.revision,pausedPosition=state.position;
 state=await post('guest',{action:'control',id:room.id,revision:0,position:9999,playing:false});assert.equal(state.revision,pausedRevision);assert.equal(state.position,pausedPosition,'Repeating a pause must not move its position');
 
+const beforeBuffer=state.revision;state=await post('owner',{action:'control',id:room.id,revision:state.revision,position:5000,playing:true,command:'seek'});
+const freshRevision=state.revision;state=await post('guest',{action:'event',id:room.id,type:'buffer',payload:{position:0,revision:beforeBuffer}});assert(state.playing);assert.equal(state.revision,freshRevision,'A late stall report must not cancel a newer Play or Seek');
 state=await post('guest',{action:'event',id:room.id,type:'buffer',payload:true});assert(!state.playing);assert(state.position>=5000);
 state=await post('owner',{action:'control',id:room.id,revision:state.revision,position:6000,playing:true});
 state=await post('guest',{action:'event',id:room.id,type:'buffer',payload:{position:5800}});assert(!state.playing);assert.equal(state.position,5800);assert.equal(state.command,'buffer');

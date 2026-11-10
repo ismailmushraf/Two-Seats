@@ -6,6 +6,7 @@ import { IncomingCallDialog } from './components/incoming-call';
 import { incomingCall, CALL_RING_MS } from './lib/call-invitations';
 import { VoiceSignalingInbox, canNegotiateVoice, primePlayback } from './lib/voice-signaling';
 import { VoiceRecovery } from './lib/voice-recovery';
+import { PlaybackHealth, PlaybackStarter } from './lib/playback-health';
 import { playbackPlan } from './lib/playback';
 import { capturePlaybackIntent, commitPlaybackIntent } from './lib/playback-controls';
 import { ReactionInbox, reactionPacket } from './lib/reactions';
@@ -41,6 +42,8 @@ export default function Cinema(){
  const canUseRooms=authStatus==='verified'&&!!session?.roomService.available;
  const [room,setRoom]=useState<Room|null>(null),[roomId,setRoomId]=useState(''),[invite,setInvite]=useState(''),[joinInput,setJoinInput]=useState(''),[invited,setInvited]=useState(false),[busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[error,setError]=useState(''),[fileName,setFileName]=useState(''),[loadingFile,setLoadingFile]=useState(false),[duration,setDuration]=useState(0),[time,setTime]=useState(0),[expanded,setExpanded]=useState(false),[muted,setMuted]=useState(false),[voice,setVoice]=useState('off'),[talking,setTalking]=useState(false),[blocked,setBlocked]=useState(false),[help,setHelp]=useState(false),[reactionMenu,setReactionMenu]=useState(false),[floats,setFloats]=useState<{id:number;emoji:string;mine:boolean}[]>([]);
  const syncMemory=useRef({revision:-1,lastSeek:0,largeDrift:0}),bestRtt=useRef(Infinity),clockKnown=useRef(false),scrubbing=useRef(false),waitingTimer=useRef<ReturnType<typeof setTimeout>|null>(null),pendingControl=useRef<{playing:boolean;position?:number;command?:string}|null>(null),ownVoiceSession=useRef(''),peerVoiceSession=useRef(''),relayConfigured=useRef(false);
+ const playbackHealth=useRef(new PlaybackHealth()),playbackStarter=useRef(new PlaybackStarter()),playbackHold=useRef<{revision:number;position:number;reason:string}|null>(null),bufferSending=useRef(false),lastHealthReport=useRef(0);
+ const [playbackStatus,setPlaybackStatus]=useState('');
  const voiceRecovery=useRef<VoiceRecovery|null>(null),voiceInbox=useRef(new VoiceSignalingInbox());
  const voiceAttempt=useRef(0),acceptingCall=useRef<string|null>(null),dismissedCalls=useRef(new Set<string>());
  const [incomingSession,setIncomingSession]=useState<string|null>(null);
@@ -176,6 +179,7 @@ export default function Cinema(){
  async function accept(b:Room){
  if(!b?.participants)return;if(roomRef.current?.id===b.id&&b.stateVersion<roomRef.current.stateVersion){ingestEvents(b.events,b.serverNow);flushVoiceEvents();return}
  if(roomRef.current?.id!==b.id)syncMemory.current={revision:-1,lastSeek:0,largeDrift:0};
+ if(playbackHold.current&&playbackHold.current.revision!==b.revision){playbackHold.current=null;if(b.playing)setPlaybackStatus('')}
  roomRef.current=b;setRoom(b);
  const peer=b.participants.find(p=>p.role!==b.role);
  if(pc.current&&canNegotiateVoice(b.participants,b.role,ownVoiceSession.current)&&peer?.voiceSession){
@@ -195,18 +199,37 @@ export default function Cinema(){
  // Stop advancing frames before any shared-position correction starts a seek.
  if(!b.playing&&!v.paused)v.pause();
  if(v.seeking||scrubbing.current)return;
+ if(playbackHold.current?.revision===b.revision){v.pause();return}
  const plan=playbackPlan(b,{time:v.currentTime,duration:v.duration,seeking:v.seeking,paused:v.paused},syncMemory.current,Date.now(),Date.now()+offset.current);
- syncMemory.current=plan.next;
- if(plan.seek)v.currentTime=plan.target;
+ const changed=b.revision!==syncMemory.current.revision;syncMemory.current=plan.next;
+ // Let a starved decoder refill instead of repeatedly chasing a moving sync target.
+ if(plan.seek&&(changed||v.readyState>=3||!b.playing||b.command==='seek'))v.currentTime=plan.target;
  v.playbackRate=plan.rate;
- if(b.playing&&v.paused)v.play().then(()=>setBlocked(false)).catch(()=>setBlocked(true));
+ if(b.playing&&v.paused)startMoviePlayback();
+ }
+ function startMoviePlayback(){const v=video.current;if(!v)return;playbackStarter.current.start(v,()=>{if(roomRef.current?.playing||localPlaybackGoal.current===true)setBlocked(true)})}
+ async function sharePlaybackHold(){
+ const hold=playbackHold.current,r=roomRef.current;if(!hold||!r?.playing||hold.revision!==r.revision||bufferSending.current||!verifiedSession.current)return;
+ bufferSending.current=true;lastHealthReport.current=Date.now();
+ try{const response=await api({action:'event',type:'buffer',payload:{position:hold.position,revision:hold.revision}});await accept(response);if(!response.playing&&!roomRef.current?.playing)setPlaybackStatus('Paused together while your player catches up. Press Play when you’re ready.')}
+ catch{if(playbackHold.current===hold)setPlaybackStatus('Your movie is paused. Reconnecting to share the pause…')}
+ finally{bufferSending.current=false}
+ }
+ function holdPlayback(reason:string){
+ const r=roomRef.current,v=video.current;if(!r?.playing||!v||playbackHold.current)return;
+ playbackHold.current={revision:r.revision,position:Math.max(0,Math.round(v.currentTime*1000)),reason};v.pause();setPlaybackStatus('Your player is catching up. Pausing both screens…');void sharePlaybackHold();
  }
  function reportBuffering(){
  if(waitingTimer.current)clearTimeout(waitingTimer.current);
- waitingTimer.current=setTimeout(()=>{const v=video.current,r=roomRef.current;if(!v||!r?.playing||v.seeking||scrubbing.current||controlsBusy.current||Date.now()-syncMemory.current.lastSeek<2500||v.readyState>=3||Date.now()-lastBuffer.current<8000)return;
- lastBuffer.current=Date.now();sendEvent('buffer',{position:Math.round(v.currentTime*1000)}).catch(()=>{});
- },1800);
+ waitingTimer.current=setTimeout(()=>{const v=video.current,r=roomRef.current;if(!v||!r?.playing||v.seeking||scrubbing.current||Date.now()-syncMemory.current.lastSeek<2500||v.readyState>=3)return;holdPlayback('buffering')},1800);
  }
+ useEffect(()=>{const timer=setInterval(()=>{
+ const v=video.current,r=roomRef.current;if(!v||!r||!verifiedSession.current)return;
+ const reason=playbackHealth.current.sample({revision:r.revision,playing:r.playing,time:v.currentTime,paused:v.paused,seeking:v.seeking,readyState:v.readyState,hidden:document.hidden,loading:mediaBusy.current||scrubbing.current||!urlRef.current},performance.now());
+ if(reason)holdPlayback(reason);
+ if(playbackHold.current&&Date.now()-lastHealthReport.current>5000)void sharePlaybackHold();
+ },500);return()=>clearInterval(timer)},[]);
+ function movieFailed(message:string){setMovieAudioStatus(message);setError(message);holdPlayback('decoder')}
  function commitScrub(){if(!scrubbing.current)return;scrubbing.current=false;control(localPlaybackGoal.current??!!roomRef.current?.playing,time*1000,'seek')}
  useEffect(()=>{mounted.current=true;
  const captureInvite=()=>{
@@ -280,7 +303,7 @@ export default function Cinema(){
  const v=video.current!;releaseMovie();const abort=new AbortController();movieAbort.current=abort;v.pause();
  if(compatibility){
  setMovieAudioStatus('Preparing compatible movie audio on this device…');
- const result=await openCompatibleMovie(v,file,abort.signal,message=>{setMovieAudioStatus(message);setError(message);if(roomRef.current?.playing)control(false)});
+ const result=await openCompatibleMovie(v,file,abort.signal,message=>{if(version===fileVersion.current)movieFailed(message)});
  if(version!==fileVersion.current||abort.signal.aborted){result.destroy();throw new DOMException('Movie changed.','AbortError')}
  compatibleMovie.current=result;urlRef.current=result.url;setSubtitleChoices(result.subtitles);setSubtitleChoice(result.subtitles[0]?.streamIndex??-1);subtitleSelection.current=result.subtitles[0]?.streamIndex??-1;setAudioTracks(result.tracks);setSelectedTrack(result.tracks[0]?.streamIndex??-1);
  setMovieAudioStatus(result.hasAudio?'Compatibility audio enabled · processed only on this device':'This file has no usable audio track. Choose a copy with sound.');
@@ -297,7 +320,7 @@ export default function Cinema(){
  }
  async function chooseFile(file?:File,forceCompatibility=false){
  if(!file||!roomRef.current)return;const v=video.current;if(!v)return;
- localPlaybackGoal.current=null;pauseFailed.current=false;setOptimisticPlaying(null);const version=++fileVersion.current;mediaBusy.current=true;setLoadingFile(true);setError('');setFileName('');setDuration(0);selectedMovie.current=file;
+ localPlaybackGoal.current=null;pauseFailed.current=false;playbackHold.current=null;playbackHealth.current.reset();setPlaybackStatus('');setOptimisticPlaying(null);const version=++fileVersion.current;mediaBusy.current=true;setLoadingFile(true);setError('');setFileName('');setDuration(0);selectedMovie.current=file;
  try{
  let movieDuration:number;
  try{movieDuration=await loadMovieSource(file,true,version)}catch(e){if((e as Error).name==='AbortError'||forceCompatibility||isMatroska(file))throw e;movieDuration=await loadMovieSource(file,false,version)}
@@ -353,12 +376,13 @@ export default function Cinema(){
  if(playing&&mediaBusy.current){toast('Wait for the movie audio to finish preparing.');return}
  if(!r.match||!r.participants.every(p=>p.ready)){if(!playing)video.current?.pause();toast('Both of you need to select the same movie and tap Ready.');return}
  // This runs before the busy guard or any await, including for a queued pause.
+ if(playing){playbackHold.current=null;playbackHealth.current.reset();setPlaybackStatus('')}
  const intent=capturePlaybackIntent(video.current,playing,position,command);
  localPlaybackGoal.current=playing;pauseFailed.current=false;setOptimisticPlaying(playing);
  if(controlsBusy.current){pendingControl.current=intent;return}
  controlsBusy.current=true;let succeeded=false;
  try{
- if(playing&&video.current){if(movieAudio.current)resumeMovieAudio();try{await video.current.play();setBlocked(false)}catch{setBlocked(true)}}
+ if(playing&&video.current){if(movieAudio.current)resumeMovieAudio();setBlocked(false);startMoviePlayback()}
  await commitPlaybackIntent<Room>(intent,r.revision,{
  send:(next,revision)=>api({action:'control',...next,revision}),
  refresh:()=>api(),accept,
@@ -419,18 +443,19 @@ export default function Cinema(){
  <section className="heading"><div className="marquee"><span className="marquee-kicker">✦ &nbsp; A PRIVATE SCREENING FOR TWO &nbsp; ✦</span><h1>Tonight,<br/><em>together.</em></h1><p>Different places. The same front-row feeling.</p><div className="marquee-billing"><span>ADMIT TWO</span><span>YOUR MOVIE · YOUR COMPANY</span><span>EST. 2026</span></div></div><p className="heading-note">A favourite film. A familiar voice.<br/>Let the rest of the world wait.</p></section>
  {authStatus==='reconnecting'&&<div className="session-banner" role="status"><LoaderCircle className="spin" size={16}/><span>Rechecking your sign-in for a few seconds. Your room and movie selection are kept; playback is paused.</span></div>}{authStatus==='signedout'&&<div className="session-banner" role="alert"><Lock size={16}/><span>Your sign-in needs to be renewed. Sign in with your own account to reconnect to your room.</span><a href={signInHref} target="_top">Sign in</a></div>}{authStatus==='error'&&<div className="session-banner" role="alert"><ShieldCheck size={16}/><span>We couldn’t verify your login. Room actions are paused until we can check it.</span><button onClick={checkSession}>Retry check</button></div>}{authStatus==='verified'&&!session?.roomService.available&&<div className="session-banner" role="alert"><Film size={16}/><span>You’re signed in, but the room service is unavailable. Please retry shortly.</span><button onClick={checkSession}>Retry</button></div>}<div className={`cinema-grid ${room?'has-room':'lobby'}`}><section className="watch-column">
  <div className={`stage ${expanded?'expanded':''}`} ref={stage}>
- <video ref={video} playsInline preload="metadata" muted={muted} onTimeUpdate={()=>{if(!scrubbing.current)setTime(video.current?.currentTime||0)}} onEnded={()=>control(false,duration*1000)} onWaiting={reportBuffering} onPlaying={()=>{if(waitingTimer.current)clearTimeout(waitingTimer.current)}} onError={()=>{if(fileName)setError('Playback failed. Try an MP4 with H.264 video and AAC audio.')}}/>
+ <video ref={video} playsInline preload="metadata" muted={muted} onTimeUpdate={()=>{if(!scrubbing.current)setTime(video.current?.currentTime||0)}} onEnded={()=>control(false,duration*1000)} onWaiting={reportBuffering} onPlaying={()=>{if(waitingTimer.current)clearTimeout(waitingTimer.current)}} onError={()=>{if(fileName)movieFailed('This device stopped decoding the movie. Both players are paused; try Repair sound / load subtitles, or an H.264/AAC MP4.')}}/>
  {!fileName&&<div className="scene"><div className="theatre-scenery" aria-hidden="true"><div className="screen-glow"/><div className="curtain curtain-left"/><div className="curtain curtain-right"/><div className="curtain-valance"/><span className="screen-ornament">✦</span></div><div className="scene-shade"/><span className="scene-corner">HOUSE LIGHTS LOW · HEARTS CLOSE</span><div className="stage-empty"><div className="film-medallion">{loadingFile?<LoaderCircle className="spin" size={26}/>:<Film size={26}/>}</div><h2>{stageLabel}</h2><p>{room?'Room joined. Choose the same movie on both devices.':busy?'Joining your private room…':'First join your partner’s room, then choose your movie.'}</p><button className="light-btn" disabled={loadingFile||repairingAudio||busy} onClick={()=>room?input.current?.click():showRoomSetup()}><Plus size={17}/>{loadingFile?'Opening movie':busy?'Joining room…':room?'Choose your movie':'Join or create a room first'}</button><small>Stays on your device. Always.</small></div></div>}
  <div className="stage-top"><span className="stage-badge"><span className={bothReady?'dot live':'dot'}/>{!canUseRooms?(authStatus==='reconnecting'||authStatus==='checking'?'RECHECKING CONNECTION':'SIGN IN TO RECONNECT'):bothReady?'Ready together':room?'ROOM JOINED · CHOOSE YOUR MOVIE':'JOIN A ROOM FIRST'}</span>{expanded&&<button className="icon-btn" title="Exit viewing mode" onClick={fullscreen}><Minimize size={19}/></button>}</div>
  {fileName&&!playerPlaying&&<button className="center-play" aria-label={bothReady?'Play together':'Waiting for both people to be ready'} onClick={()=>control(true)}><Play fill="currentColor" size={28}/></button>}
  <SubtitleOverlay video={video} read={readSubtitle} readBitmap={readSubtitleBitmap}/>
  <div className="reaction-floats" aria-live="polite">{floats.map(f=><span className="float" key={f.id} style={{left:`${20+(f.id%60)}%`}}>{f.emoji}<small>{f.mine?'You':'Your person'}</small></span>)}</div>
- {blocked&&<button className="unlock" onClick={()=>{if(movieAudio.current)resumeMovieAudio();if(roomRef.current?.playing)video.current?.play().then(()=>setBlocked(false)).catch(()=>{});audio.current?.play().then(()=>setBlocked(false)).catch(()=>{})}}>Tap to enable playback & sound</button>}
+ {blocked&&<button className="unlock" onClick={()=>{if(movieAudio.current)resumeMovieAudio();if(roomRef.current?.playing)video.current?.play().then(()=>setBlocked(false)).catch(()=>{});else if(video.current){primePlayback(video.current,()=>!roomRef.current?.playing,muted,()=>setBlocked(true));setBlocked(false)}audio.current?.play().then(()=>setBlocked(false)).catch(()=>{})}}>Tap to enable playback & sound</button>}
  <div className="player-bottom"><input className="seek" type="range" aria-label="Seek movie for both people" min="0" max={duration||1} value={Math.min(time,duration||1)} step=".1" disabled={!bothReady} onPointerDown={()=>{scrubbing.current=true}} onChange={e=>{scrubbing.current=true;setTime(Number(e.target.value))}} onPointerUp={commitScrub} onKeyUp={commitScrub} onBlur={commitScrub} onPointerCancel={()=>{scrubbing.current=false}}/>
  <div className="player-controls"><button className="icon-btn" aria-label={playerPlaying?'Pause for both':'Play together'} onClick={()=>control(!(localPlaybackGoal.current??roomRef.current?.playing??false))} disabled={!fileName||!canUseRooms}>{playerPlaying?<Pause size={19} fill="currentColor"/>:<Play size={19} fill="currentColor"/>}</button><button className="icon-btn back-ten" aria-label="Back ten seconds for both" onClick={()=>control(localPlaybackGoal.current??!!roomRef.current?.playing,Math.max(0,time-10)*1000,'seek')} disabled={!bothReady}><SkipBack size={17}/></button><span className="time">{clock(time)} <span>/ {clock(duration)}</span></span><div className="control-spacer"/><button className={`talk-mini ${talking?'talking':''}`} disabled={voice!=='connected'} onClick={toggleTalk} aria-pressed={talking} aria-label={talking?'Mute microphone':'Unmute microphone'}>{talking?<Mic size={17}/>:<MicOff size={17}/>}<span>{talking?'Mic on':'Mic off'}</span></button><div className="reaction-wrap"><button className="icon-btn" title="Show or hide reactions" aria-label="Show or hide reactions" aria-expanded={reactionMenu} disabled={!room||!canUseRooms} onClick={()=>setReactionMenu(open=>!open)}><Smile size={20}/></button>{reactionMenu&&<div className="reaction-pop">{reactions.map(e=><button key={e} onClick={()=>reactTogether(e)}>{e}</button>)}</div>}</div>{fileName&&<button className="icon-btn" aria-label={!subtitleChoices.length?'Add subtitles':subtitleChoice===-1?'Show subtitles':'Hide subtitles'} aria-pressed={subtitleChoice!==-1} onClick={()=>{if(!subtitleChoices.length){subtitleInput.current?.click();return}chooseSubtitle(subtitleChoice===-1?subtitleChoices[0].streamIndex:-1)}}><Captions size={19}/></button>}<button className="icon-btn" title={muted?'Unmute movie':'Mute movie'} onClick={()=>setMuted(!muted)}>{muted?<VolumeX size={19}/>:<Volume2 size={19}/>}</button><button className="icon-btn" aria-label={expanded?'Exit viewing mode':'Expand viewing mode'} onClick={fullscreen}>{expanded?<Minimize size={19}/>:<Expand size={19}/>}</button></div></div>
  </div>
  <input ref={subtitleInput} className="hidden-input" type="file" accept=".srt,.vtt,.ass,.ssa" aria-label="Choose subtitle file" onChange={e=>loadSubtitle(e.target.files?.[0])}/>
  <input ref={input} className="hidden-input" type="file" accept="video/*,.mkv,.mp4,.mov,.webm" onChange={e=>chooseFile(e.target.files?.[0])}/>
+ {playbackStatus&&<div className="session-banner" role="status"><LoaderCircle size={16}/><span>{playbackStatus}</span></div>}
  <div className="under-player"><div><span className="little-icon"><Film size={18}/></span><div><strong>{fileName||'Tonight’s feature'}</strong><small>{fileName?'Loaded from your device · never uploaded':'Bring a movie. We’ll bring you together.'}</small></div></div><button className="text-btn" disabled={loadingFile||repairingAudio||busy} onClick={()=>room?input.current?.click():showRoomSetup()}>{fileName?'Change movie':room?'Choose file':'Join room first'}<ArrowUpRight size={15}/></button></div>
  {selectedMovie.current&&<div className="movie-audio-panel"><div><Volume2 size={17}/><strong>Movie sound & subtitles</strong></div><p role="status">{movieAudioStatus}</p>{subtitleChoices.length>0&&<label>Subtitles<select aria-label="Movie subtitles" value={subtitleChoice} onChange={e=>chooseSubtitle(Number(e.target.value))}><option value={-1}>Off</option>{subtitleChoices.map(track=><option value={track.streamIndex} key={track.streamIndex}>{track.title}{track.language?` · ${track.language}`:''}</option>)}</select></label>}<p className="subtitle-status" role="status">{subtitleStatus}</p>{subtitleFileError&&<p role="alert">{subtitleFileError}</p>}<button className="text-btn" disabled={!fileName||loadingFile||repairingAudio} onClick={()=>subtitleInput.current?.click()}>Add subtitle file · SRT / VTT / ASS</button>{subtitleChoices.length>0&&<label>Subtitle timing (seconds)<input aria-label="Subtitle timing offset in seconds" type="number" min={-60} max={60} step={0.5} value={subtitleOffset} onChange={e=>{const value=Number(e.target.value);if(Number.isFinite(value)&&Math.abs(value)<=60){subtitleDelay.current=value;setSubtitleOffset(value)}}}/><small>Positive values show subtitles later.</small></label>}{audioTracks.length>1&&<label>Audio track<select aria-label="Movie audio track" value={selectedTrack} disabled={loadingFile||repairingAudio} onChange={e=>changeMovieTrack(Number(e.target.value))}>{audioTracks.map((track,i)=><option value={track.streamIndex} key={track.streamIndex}>{track.title||`Track ${i+1}`}{track.language?` · ${track.language}`:''}</option>)}</select></label>}<button className="text-btn" disabled={loadingFile||repairingAudio} onClick={repairMovieSound}>{repairingAudio?<><LoaderCircle className="spin" size={14}/>Preparing audio…</>:compatibleMovie.current?'Restart audio compatibility':'Repair sound / load subtitles'}</button><small>Embedded text subtitles display inside this player. Embedded PGS picture subtitles are decoded locally. VobSub needs a separate text subtitle file. Converts supported audio to AAC locally. Some video codecs and protected files still need conversion to H.264/AAC MP4.</small></div>}
  <div className="privacy-note"><ShieldCheck size={16}/><span>Your movie stays yours. Only playback controls and connection data are shared.</span></div>

@@ -97,10 +97,12 @@ async function handle(req:Request,write:boolean){try{
  if(!r[role+'_voice']||!r[peer+'_voice']||b.payload?.fromSession!==r[role+'_voice_session']||b.payload?.toSession!==r[peer+'_voice_session'])fail('Voice session changed. Retry the connection.',409);
  if(['offer','answer'].includes(b.type)&&(b.payload.data?.type!==b.type||typeof b.payload.data?.sdp!=='string'))fail('Invalid voice handshake.');
  }
+ if(b.type==='buffer'&&typeof b.payload==='object'&&b.payload?.revision!=null&&!Number.isSafeInteger(b.payload.revision))fail('Invalid buffering revision.');
+ if(b.type==='buffer'&&typeof b.payload==='object'&&b.payload?.revision!=null&&b.payload.revision!==r.revision)return json(roomResponse(r,uid,[]));
  const category=b.type==='reaction'?'reaction':'signal';const query=category==='reaction'?"SELECT COUNT(*) AS n FROM events WHERE room=? AND sender=? AND type='reaction' AND created>?":"SELECT COUNT(*) AS n FROM events WHERE room=? AND sender=? AND type!='reaction' AND created>?";
  const recent:any=await db.prepare(query).bind(id,uid,now-60000).first();if(recent.n>=(category==='reaction'?120:600))fail('Too many events. Try again in a moment.',429);
  await db.prepare('INSERT INTO events(room,sender,type,payload,created) VALUES (?,?,?,?,?)').bind(id,uid,b.type,payload,now).run();
- if(b.type==='buffer'&&b.payload!==false&&r.playing){const pos=Math.min(Number(r.owner_media?.split(':')[2])||86400000,typeof b.payload==='object'?Math.round(b.payload.position):r.position+now-r.updated);await db.prepare("UPDATE rooms SET playing=0,position=?,updated=?,command='buffer',revision=revision+1,state_version=state_version+1 WHERE id=? AND revision=?").bind(pos,now,id,r.revision).run();}
+ if(b.type==='buffer'&&b.payload!==false&&r.playing&&(typeof b.payload!=='object'||b.payload.revision==null||b.payload.revision===r.revision)){const pos=Math.min(Number(r.owner_media?.split(':')[2])||86400000,typeof b.payload==='object'?Math.round(b.payload.position):r.position+now-r.updated);await db.prepare("UPDATE rooms SET playing=0,position=?,updated=?,command='buffer',revision=revision+1,state_version=state_version+1 WHERE id=? AND revision=?").bind(pos,now,id,r.revision).run();}
  }else if(action!=='join')fail('Unknown room action.');
  }
  await db.prepare(`UPDATE rooms SET ${role}_seen=? WHERE id=?`).bind(now,id).run();
