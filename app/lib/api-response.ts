@@ -1,5 +1,5 @@
 export class ApiResponseError extends Error{
- constructor(message:string,readonly status:number,readonly code:'auth'|'response'='response'){super(message);this.name='ApiResponseError';}
+ constructor(message:string,readonly status:number,readonly code:'auth'|'response'|'connection'|'canceled'='response'){super(message);this.name='ApiResponseError';}
 }
 /** A brief verification failure is not a logout. Require confirmation over ten seconds. */
 export class SessionRecovery{
@@ -34,3 +34,19 @@ export async function readApiResponse(response:Response):Promise<any>{
 
 /** A failed network probe cannot revoke an already verified identity. Explicit auth failures can. */
 export function keepVerifiedSession(verified:boolean,error:unknown){return verified&&!(error instanceof ApiResponseError&&error.code==='auth');}
+
+/** Retry only reads or explicitly idempotent actions; never replay playback or room creation. */
+export async function requestJson(input:RequestInfo|URL,init:RequestInit={},options:{retry?:boolean;timeout?:number;current?:()=>boolean}={}){
+ for(let attempt=0;;attempt++){
+  const controller=new AbortController(),signal=init.signal;
+  const cancel=()=>controller.abort();if(signal?.aborted)cancel();else signal?.addEventListener('abort',cancel,{once:true});
+  const timer=setTimeout(cancel,options.timeout??15000);
+  try{return await readApiResponse(await fetch(input,{...init,signal:controller.signal}))}
+  catch(error){
+   if(signal?.aborted)throw new ApiResponseError('Request canceled.',0,'canceled');
+   const e=error instanceof ApiResponseError?error:new ApiResponseError('The connection was interrupted. Please retry.',408,'connection');
+   if(options.retry&&attempt===0&&[408,502,503,504].includes(e.status)&&options.current?.()!==false){continue}
+   throw e;
+  }finally{clearTimeout(timer);signal?.removeEventListener('abort',cancel)}
+ }
+}

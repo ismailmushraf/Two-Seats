@@ -5,10 +5,10 @@ import Cinema from '../../app/page';
 export default function CallQA(){
  const [role,setRole]=useState(''),[ready,setReady]=useState(false),[stats,setStats]=useState('');
  useEffect(()=>{
-  const side=new URLSearchParams(location.search).get('role')||'';setRole(side);
+  const params=new URLSearchParams(location.search),side=params.get('role')||'',real=params.has('real');setRole(side);
   if(!side){
-   (window as any).__callQA={people:{owner:{voice:false,voiceSession:''},guest:{voice:false,voiceSession:''}},events:[],version:1,captures:0,offers:0,answers:0,delay:false};
-   setReady(true);const timer=setInterval(()=>{const q=(window as any).__callQA;setStats(JSON.stringify({captures:q.captures,offers:q.offers,answers:q.answers,people:q.people}))},250);return()=>clearInterval(timer);
+   (window as any).__callQA={people:{owner:{voice:false,voiceSession:''},guest:{voice:false,voiceSession:''}},events:[],version:1,captures:0,offers:0,answers:0,delay:false,pcs:{},failRead:false,readRetries:0};
+   setReady(true);const timer=setInterval(()=>{const q=(window as any).__callQA;setStats(JSON.stringify({captures:q.captures,offers:q.offers,answers:q.answers,people:q.people,icePackets:q.events.filter((e:any)=>e.type==='ice').length,peers:Object.fromEntries(Object.entries(q.pcs).map(([role,p]:[string,any])=>[role,{connection:p.connectionState,ice:p.iceConnectionState,gathering:p.iceGatheringState,local:p.localDescription?.type,remote:p.remoteDescription?.type}]))}))},250);return()=>clearInterval(timer);
   }
   const q=(window.parent as any).__callQA;if(!q)return;
   const original=window.fetch,OriginalPeer=window.RTCPeerConnection,capture=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices),saved=sessionStorage.getItem('two-seats-room');
@@ -24,11 +24,11 @@ export default function CallQA(){
    connect(){this.connectionState='connected';this.iceConnectionState='connected';this.onconnectionstatechange?.();this.oniceconnectionstatechange?.()}
    async addIceCandidate(){}close(){this.connectionState='closed'}
   }
-  window.RTCPeerConnection=Peer as any;
+  if(!real)window.RTCPeerConnection=Peer as any;else window.RTCPeerConnection=class extends OriginalPeer{constructor(config?:RTCConfiguration){super(config);q.pcs[side]=this}};
   const room=()=>({id:'a'.repeat(32),role:side,stateVersion:q.version,serverNow:Date.now(),expires:Date.now()+3600000,playing:false,position:0,revision:1,updated:Date.now(),command:'pause',match:true,participants:['owner','guest'].map(role=>({role,present:true,online:true,ready:false,loaded:false,...q.people[role]})),events:q.events.map((e:any)=>({...e,mine:e.sender===side}))});
   sessionStorage.setItem('two-seats-room',JSON.stringify({id:'a'.repeat(32)}));
   window.fetch=async(input,options)=>{
-   const path=String(input);if(path.startsWith('/api/session'))return Response.json({authenticated:true,user:{email:side+'@example.invalid',displayName:side},roomService:{available:true}});
+   const path=String(input);if(path.startsWith('/api/room')&&!options?.body&&q.failRead){q.failRead=false;q.readRetries++;throw new DOMException('Fetch is aborted','AbortError')}if(path.startsWith('/api/session'))return Response.json({authenticated:true,user:{email:side+'@example.invalid',displayName:side},roomService:{available:true}});
    if(path.startsWith('/api/room')){
     const b=options?.body?JSON.parse(String(options.body)):{};const own=q.people[side],peer=q.people[side==='owner'?'guest':'owner'];
     const event=(type:string,payload:any)=>q.events.push({id:q.events.length+1,sender:side,type,payload,created:Date.now()});
@@ -41,7 +41,7 @@ export default function CallQA(){
     if(b.action==='decline-call'){
      if(own.voice||peer.voiceSession!==b.session)return Response.json({error:'Invitation ended'},{status:409});event('call-declined',{toSession:b.session});peer.voice=false;peer.voiceSession='';q.version++;
     }
-    if(b.action==='event')event(b.type,b.payload);
+    if(b.action==='event'){if(real){if(b.type==='offer')q.offers++;if(b.type==='answer')q.answers++}if(['offer','answer','ice','restart'].includes(b.type)&&(!own.voice||!peer.voice||own.voiceSession!==b.payload?.fromSession||peer.voiceSession!==b.payload?.toSession))return Response.json({error:'Voice session changed'},{status:409});event(b.type,b.payload)}
     return Response.json(room());
    }
    return original(input,options);
@@ -50,5 +50,5 @@ export default function CallQA(){
  },[]);
  if(!ready)return <p>Preparing call checks…</p>;
  if(role)return <Cinema/>;
- return <><div style={{padding:12}}><strong>Two-device call QA · synthetic microphone and RTC</strong><button onClick={()=>{const q=(window as any).__callQA;q.delay=!q.delay}}>Toggle 4-second microphone delay</button><button onClick={()=>{document.querySelectorAll('iframe').forEach(f=>{const b=Array.from(f.contentDocument!.querySelectorAll('button')).find(b=>b.textContent?.trim()==='Enable voice');b?.click()})}}>Call from both devices together</button><pre style={{whiteSpace:'pre-wrap'}}>{stats}</pre></div><div style={{display:'flex',gap:8}}>{['owner','guest'].map(role=><iframe key={role} title={role} src={'/media-qa?role='+role} style={{width:390,maxWidth:'48vw',height:800,border:'2px solid #621e2a'}}/>)}</div></>;
+ return <><div style={{padding:12}}><strong>Two-device call QA · synthetic microphone · optional native WebRTC with ?real=1</strong><button onClick={()=>{const q=(window as any).__callQA;q.delay=!q.delay}}>Toggle 4-second microphone delay</button><button onClick={()=>{document.querySelectorAll('iframe').forEach(f=>{const b=Array.from(f.contentDocument!.querySelectorAll('button')).find(b=>b.textContent?.trim()==='Enable voice');b?.click()})}}>Call from both devices together</button><button onClick={()=>{(window as any).__callQA.failRead=true;document.querySelectorAll('iframe').forEach(f=>f.contentDocument!.dispatchEvent(new Event('visibilitychange')))}}>Interrupt fetch and return to room</button><pre style={{whiteSpace:'pre-wrap'}}>{stats}</pre></div><div style={{display:'flex',gap:8}}>{['owner','guest'].map(role=><iframe key={role} title={role} src={'/media-qa?role='+role+(location.search.includes('real')?'&real=1':'')} style={{width:390,maxWidth:'48vw',height:800,border:'2px solid #621e2a'}}/>)}</div></>;
 }

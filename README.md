@@ -110,3 +110,13 @@ Enable voice sends your partner an in-room Accept / Decline dialog, including in
 Acceptance and decline target a specific call session. Atomic server guards reject expired or already accepted invitations; cancellation tombstones prevent delayed requests from reviving canceled calls. Retry, microphone permission, speech ducking and ICE recovery continue through the existing voice connection.
 
 Validation: `node tests/room.test.mjs` covers invitation consent and races. `node tests/prepare-media-qa.mjs --calls` provides two real player UIs with synthetic microphones and shared simulated signaling; remove the generated route with `--clean` before building. This fixture checks UI behavior, not real cross-network audio delivery.
+
+## Interrupted requests and Ready recovery
+
+Readiness is posted independently of the best-effort video autoplay priming. Sync-driven pauses can reject `play()` with AbortError; that expected interruption no longer blocks Ready. A genuine autoplay permission restriction still offers the playback unlock control.
+
+Room polling and live streams stop when hidden and reopen with a fresh snapshot/cursor on visibility, pageshow or network recovery. Obsolete polls are canceled silently. Safe reads, Ready, voice configuration and session-scoped voice changes get one bounded retry after a connection interruption; playback commands and room creation are not blindly replayed. Unresolved connection failures use a readable retry message rather than raw browser abort text.
+
+Voice negotiation waits until the local call session appears in the room snapshot. An incoming offer/candidate arriving ahead of its matching snapshot is kept briefly in a bounded inbox and processed once the snapshot catches up. This avoids negotiating an unadvertised attempt or permanently discarding early signaling. Existing membership checks, mic consent and stale-session rejection remain in place.
+
+`node tests/connection-interruption.test.mjs` covers interrupted priming, stale own-session snapshots, early signaling, retry limits, explicit cancellation, timeouts and auth failures. Call browser QA supports `?real=1` for native WebRTC with synthetic silent audio; same-browser signaling succeeds, but the cloud browser produced no ICE candidates without a relay, so actual cross-network audio remains a device acceptance test.
