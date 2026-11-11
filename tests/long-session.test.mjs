@@ -25,5 +25,6 @@ try{
  recovery.stop();recovery.request(true);await advance(60000);assert.equal(attempts,4,'User hangup cancels all recovery');
  let finish;const slow=new VoiceRecovery(()=>new Promise(resolve=>finish=resolve),()=>assert.fail('Stopped peer failed'));slow.request(true);await advance(0);slow.stop();finish();await Promise.resolve();await advance(60000);assert.equal(timers.size,0,'Late work cannot revive a closed peer');
  const transient=new VoiceRecovery(async()=>{throw new Error('Signaling offline')},()=>failures++);transient.request(true);await advance(40000);assert.equal(failures,2);transient.stop();
+ let offline=true,active=0,ended=0;const deferred=new VoiceRecovery(async()=>{if(offline)return 'defer';active++},()=>ended++);deferred.request(true);await advance(120000);assert.equal(active,0);assert.equal(ended,0,'Offline/background waiting must not exhaust active ICE retries');offline=false;await advance(50000);assert.equal(active,3);assert.equal(ended,1);deferred.stop();
  console.log('PASS: voice grace period, deduplicated bounded retries, recovered/closed peer cancellation, and signaling outages.');
 }finally{globalThis.setTimeout=nativeSet;globalThis.clearTimeout=nativeClear}

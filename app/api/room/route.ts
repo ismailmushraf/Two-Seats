@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { authenticatedUser } from '../../lib/session';
-import { roomResponse } from '../../lib/room-response';
+import { roomResponse, mediaMatch } from '../../lib/room-response';
 import { reactionPacket } from '../../lib/reactions';
 export const dynamic = 'force-dynamic';
 const relayCache=new Map<string,{expires:number;config:any}>();
@@ -30,14 +30,20 @@ async function handle(req:Request,write:boolean){try{
  if(write){
  const action=b.action;
  if(action==='close'){if(role!=='owner')fail('Only the room creator can close it.',403);await db.batch([db.prepare('DELETE FROM events WHERE room=?').bind(id),db.prepare('DELETE FROM rooms WHERE id=?').bind(id)]);return json({closed:true});}
- if(action==='media'){
+ if(action==='attach'){
+ const peer=role==='owner'?'guest':'owner',position=r.playing?r.position+now-r.updated:r.position;
+ await db.batch([
+ db.prepare(`INSERT INTO events(room,sender,type,payload,created) SELECT id,?,'hangup',json_object('fromSession',${role}_voice_session,'toSession',${peer}_voice_session,'data',NULL,'reason','refreshed'),? FROM rooms WHERE id=? AND ${role}_voice=1`).bind(uid,now,id),
+ db.prepare(`UPDATE rooms SET ${role}_ready=0,${role}_voice=0,${role}_voice_session=NULL,playing=0,position=?,updated=?,command='pause',revision=revision+1,state_version=state_version+1 WHERE id=?`).bind(Math.min(position,Number(r.owner_media?.split(':')[2])||86400000),now,id),
+ ]);
+ }else if(action==='media'){
  if(typeof b.media!=='string'||!/^\d{1,12}:[a-f0-9]{64}:\d{1,9}$/.test(b.media))fail('Choose a playable movie file.');
- await db.prepare(`UPDATE rooms SET ${role}_media=?,${role}_ready=0,playing=0,position=0,revision=revision+1,state_version=state_version+1,command='media',updated=? WHERE id=?`).bind(b.media,now,id).run();
+ if(r[role+'_media']!==b.media)await db.prepare(`UPDATE rooms SET ${role}_media=?,${role}_ready=0,playing=0,position=0,revision=revision+1,state_version=state_version+1,command='media',updated=? WHERE id=?`).bind(b.media,now,id).run();
  }else if(action==='ready'){
  if(!r[role+'_media'])fail('Choose a movie first.');await db.prepare(`UPDATE rooms SET ${role}_ready=1,state_version=state_version+1 WHERE id=?`).bind(id).run();
  }else if(action==='control'){
  if(!Number.isInteger(b.revision)||!Number.isFinite(b.position)||b.position<0||b.position>86400000||typeof b.playing!=='boolean')fail('Invalid playback command.');
- if(!r.owner_ready||!r.guest_ready||!r.owner_media||r.owner_media!==r.guest_media)fail('Both people must load the same movie and tap Ready.');
+ if(!r.owner_ready||!r.guest_ready||!r.owner_media||!mediaMatch(r.owner_media,r.guest_media))fail('Both people must load movies with matching runtimes and tap Ready.');
  const duration=Number(r.owner_media.split(':')[2]);if(b.position>duration+1000)fail('Playback position exceeds the movie length.');
  const command=b.command==='seek'?'seek':b.playing?'play':'pause';
  if(command==='pause'&&!r.playing&&r.command==='pause')return json(roomResponse(r,uid,[]));
@@ -79,10 +85,11 @@ async function handle(req:Request,write:boolean){try{
  const out=await db.prepare(`UPDATE rooms SET ${role}_voice=1,${role}_voice_session=?,state_version=state_version+1 WHERE id=? AND NOT EXISTS (SELECT 1 FROM events WHERE room=? AND sender=? AND type='voice-cancel' AND payload=?)${accepted}`).bind(...args).run();
  if(!out.meta.changes)fail('That call was canceled or the invitation has ended.',409);
  }else{
+ const reason=['local','connection','microphone','no_answer'].includes(b.reason)?b.reason:'local';
  const guard=`id=? AND (? IS NULL OR ${role}_voice_session=?)`;
  const statements=[];
  if(session)statements.push(db.prepare("INSERT INTO events(room,sender,type,payload,created) VALUES (?,?,?,?,?)").bind(id,uid,'voice-cancel',JSON.stringify(session),now));
- statements.push(db.prepare(`INSERT INTO events(room,sender,type,payload,created) SELECT id,?,'hangup',json_object('fromSession',${role}_voice_session,'toSession',${peer}_voice_session,'data',NULL),? FROM rooms WHERE ${guard}`).bind(uid,now,id,session||null,session||null));
+ statements.push(db.prepare(`INSERT INTO events(room,sender,type,payload,created) SELECT id,?,'hangup',json_object('fromSession',${role}_voice_session,'toSession',${peer}_voice_session,'data',NULL,'reason',?),? FROM rooms WHERE ${guard}`).bind(uid,reason,now,id,session||null,session||null));
  statements.push(db.prepare(`UPDATE rooms SET ${role}_voice=0,${role}_voice_session=NULL,state_version=state_version+1 WHERE ${guard}`).bind(id,session||null,session||null));
  await db.batch(statements);
  }

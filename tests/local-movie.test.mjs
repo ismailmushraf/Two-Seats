@@ -1,0 +1,12 @@
+import {readFileSync} from 'node:fs';import ts from 'typescript';import assert from 'node:assert/strict';
+const js=ts.transpileModule(readFileSync('app/lib/local-movie.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.ES2022,target:ts.ScriptTarget.ES2022}}).outputText;
+const {savedFile,storageMessage}=await import('data:text/javascript;base64,'+Buffer.from(js).toString('base64'));
+let asked=0,opened=0,permission='prompt';const file=new File(['movie bytes'],'movie.mkv',{lastModified:123});
+const handle={async queryPermission(){return permission},async requestPermission(){asked++;return permission='granted'},async getFile(){opened++;return file}};
+const record={name:'movie.mkv',type:'video/x-matroska',modified:123,media:'1:a:3000',size:11,saved:0,handle};
+assert.equal(await savedFile(record),null);assert.equal(asked,0,'Refresh cannot prompt or reopen a microphone/file permission automatically');assert.equal(opened,0);
+assert.equal(await savedFile(record,true),file);assert.equal(asked,1);assert.equal(await savedFile(record),file);assert.equal(asked,1);
+const cached=await savedFile({...record,handle:undefined,blob:new Blob(['movie bytes'])});assert.equal(cached.name,'movie.mkv');assert.equal(cached.lastModified,123);assert.equal(await cached.text(),'movie bytes');
+assert.match(storageMessage({name:'QuotaExceededError'}),/Not enough browser space/);
+assert.equal(await savedFile({...record,handle:undefined}),null);
+console.log('PASS: persisted file-handle permission is queried silently, renewed only on a tap, and Blob copies restore original file metadata and bytes.');

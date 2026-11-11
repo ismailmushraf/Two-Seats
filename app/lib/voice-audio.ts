@@ -28,6 +28,7 @@ export class VoiceMovieAudio {
   private enabled=false;
   private disposed=false;
   constructor(private video:HTMLVideoElement,private streams:()=>Array<MediaStream|null>){}
+  get state(){return this.context?.state||'unknown'}
   async resume(){
     if(this.disposed)return;
     try{

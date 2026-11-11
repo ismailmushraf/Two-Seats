@@ -10,3 +10,7 @@ export const rooms = sqliteTable('rooms', {
 export const events = sqliteTable('events', {
  id: integer('id').primaryKey({autoIncrement:true}), room: text('room').notNull().references(()=>rooms.id,{onDelete:'cascade'}), sender:text('sender').notNull(), type:text('type').notNull(), payload:text('payload').notNull(), created:integer('created').notNull(),
 },t=>[index('events_room_idx').on(t.room,t.id)]);
+
+export const diagnostics = sqliteTable('diagnostics', {
+ id:integer('id').primaryKey({autoIncrement:true}),room:text('room').notNull(),role:text('role').notNull(),code:text('code').notNull(),details:text('details').notNull(),created:integer('created').notNull(),
+});

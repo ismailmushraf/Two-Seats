@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers';
+import { diagnosticOwner } from '../../lib/diagnostics';
 import { authenticatedUser } from '../../lib/session';
 export const dynamic = 'force-dynamic';
 export async function GET(request: Request) {
@@ -13,5 +14,5 @@ export async function GET(request: Request) {
       available = true;
     }
   } catch { /* Never expose infrastructure details to the browser. */ }
-  return Response.json({ authenticated: true, user: { email: user.email, displayName: user.displayName }, roomService: { available } }, { headers });
+  return Response.json({ authenticated: true, isOwner:diagnosticOwner(user.email,env.DIAGNOSTICS_OWNER_EMAIL), user: { email: user.email, displayName: user.displayName }, roomService: { available } }, { headers });
 }

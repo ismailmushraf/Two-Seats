@@ -50,7 +50,7 @@ state=await post('guest',{action:'event',id:room.id,type:'buffer',payload:{posit
 state=await post('owner',{action:'event',id:room.id,type:'reaction',payload:'❤️'});assert(state.events.some(e=>e.type==='reaction'));
 await post('owner',{action:'event',id:room.id,type:'reaction',payload:'<script>'},400);
 await post('outsider',{action:'event',id:room.id,type:'reaction',payload:'❤️'},403);
-await post('guest',{action:'media',id:room.id,media:m.replace('123456','654321')});state=await post('guest',{action:'ready',id:room.id});assert(!state.match);
+await post('guest',{action:'media',id:room.id,media:m.replace('123456','654321').replace('7200000','7210000')});state=await post('guest',{action:'ready',id:room.id});assert(!state.match);
 await post('owner',{action:'control',id:room.id,revision:state.revision,position:0,playing:true},400);
 // Call invitations share the existing session-scoped signaling, with atomic consent guards.
 const callRoom=await post('caller',{action:'create'}),callId=callRoom.id;
@@ -87,6 +87,16 @@ assert.equal(incomingCall(people,'owner',true,new Set()),null,'Crossed calls alr
 assert.equal(incomingCall(people,'owner',false,new Set([callA])),null);
 assert.equal(incomingCall(people.map(p=>({...p,online:false})),'owner',false,new Set()),null);
 console.log('PASS: call invitations, accept/decline consent, crossed calls, cancellation tombstones and stale responses.');
+
+// Reattaching a refreshed page preserves the movie position and gives it a fresh Ready/mic consent.
+const rr=await post('refresh-owner',{action:'create'});await post('refresh-guest',{action:'join',id:rr.id,token:rr.token});
+await post('refresh-owner',{action:'media',id:rr.id,media:m});await post('refresh-guest',{action:'media',id:rr.id,media:m.replace('123456','999999').replace('7200000','7201000')});
+await post('refresh-owner',{action:'ready',id:rr.id});let refreshed=await post('refresh-guest',{action:'ready',id:rr.id});assert(refreshed.match);assert.equal(refreshed.matchKind,'duration');
+refreshed=await post('refresh-owner',{action:'control',id:rr.id,revision:refreshed.revision,position:35000,playing:true});
+await post('refresh-owner',{action:'voice',id:rr.id,enabled:true,session:'7'.repeat(32)});await post('refresh-guest',{action:'voice',id:rr.id,enabled:true,session:'8'.repeat(32)});
+refreshed=await post('refresh-owner',{action:'attach',id:rr.id});assert(!refreshed.playing);assert(refreshed.position>=35000);assert(!refreshed.participants[0].ready);assert(!refreshed.participants[0].voice);assert(refreshed.participants[1].ready);assert(refreshed.events.some(e=>e.type==='hangup'&&e.payload.reason==='refreshed'));
+const savedPosition=refreshed.position,savedRevision=refreshed.revision;refreshed=await post('refresh-owner',{action:'media',id:rr.id,media:m});assert.equal(refreshed.position,savedPosition);assert.equal(refreshed.revision,savedRevision,'Restoring an identical movie must not reset playback');
+console.log('PASS: different encodes match by runtime; refresh pauses safely, preserves the timeline, reports the call reason and does not reset on cached media restore.');
 
 // Voice messages are scoped to the current attempt on both devices.
 const voiceA='c'.repeat(32),voiceB='d'.repeat(32),voiceNew='e'.repeat(32);
@@ -138,7 +148,8 @@ assert.equal(sqlite.prepare('SELECT COUNT(*) n FROM events WHERE room=?').get(ro
 const expired=await post('expiry',{action:'create'});sqlite.prepare('UPDATE rooms SET expires=0 WHERE id=?').run(expired.id);await get('expiry',expired.id,404);
 console.log('PASS: sign-in, origin/CSRF, hashed invites, two-person limits, member authorization, movie mismatch, readiness, play/seek revisions, buffering pause, reactions, creation limits, expiry and close cleanup.');
 
-const sessionSource=readFileSync('app/api/session/route.ts','utf8').replace("import { env } from 'cloudflare:workers';","const env=globalThis.__testEnv;").replace('../../lib/session',sessionUrl);
+const diagnosticsJs=ts.transpileModule(readFileSync('app/lib/diagnostics.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.ES2022,target:ts.ScriptTarget.ES2022}}).outputText;const diagnosticsUrl='data:text/javascript;base64,'+Buffer.from(diagnosticsJs).toString('base64');
+const sessionSource=readFileSync('app/api/session/route.ts','utf8').replace("import { env } from 'cloudflare:workers';","const env=globalThis.__testEnv;").replace('../../lib/session',sessionUrl).replace('../../lib/diagnostics',diagnosticsUrl);
 const sessionCode=ts.transpileModule(sessionSource,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;
 const sessionApi=await import('data:text/javascript;base64,'+Buffer.from(sessionCode).toString('base64'));
 const sessionRequest=(headers={})=>sessionApi.GET(new Request(origin+'/api/session',{headers}));

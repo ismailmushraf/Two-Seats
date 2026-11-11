@@ -5,7 +5,7 @@ export class VoiceRecovery {
  private stopped=false;
  private running=false;
  private generation=0;
- constructor(private attempt:()=>Promise<void>,private exhausted:()=>void){}
+ constructor(private attempt:()=>Promise<void|'defer'>,private exhausted:()=>void){}
  request(immediate=false){
   if(this.stopped||this.running||this.timer||this.attempts>=3)return;
   this.timer=setTimeout(()=>{this.timer=null;void this.run()},immediate?0:5000);
@@ -14,10 +14,10 @@ export class VoiceRecovery {
   if(this.stopped)return;
   if(this.attempts>=3){this.exhausted();return}
   const generation=this.generation;this.running=true;this.attempts++;
-  try{await this.attempt()}catch{/* Retry signaling outages with the same session. */}
+  let deferred=false;try{deferred=await this.attempt()==='defer';if(deferred)this.attempts--}catch{/* Retry signaling outages with the same session. */}
   finally{
    this.running=false;
-   if(!this.stopped&&generation===this.generation)this.timer=setTimeout(()=>{this.timer=null;void this.run()},12000);
+   if(!this.stopped&&generation===this.generation)this.timer=setTimeout(()=>{this.timer=null;void this.run()},deferred?5000:12000);
   }
  }
  connected(){this.generation++;this.attempts=0;if(this.timer)clearTimeout(this.timer);this.timer=null;}

@@ -1,0 +1,19 @@
+import {DatabaseSync} from 'node:sqlite';import {readFileSync,readdirSync} from 'node:fs';import ts from 'typescript';import assert from 'node:assert/strict';
+const sqlite=new DatabaseSync(':memory:');for(const file of readdirSync('drizzle').filter(x=>x.endsWith('.sql')).sort())sqlite.exec(readFileSync('drizzle/'+file,'utf8'));
+const adapt=(sql,values=[])=>({bind(...args){return adapt(sql,args)},async first(){return sqlite.prepare(sql).get(...values)||null},async all(){return {results:sqlite.prepare(sql).all(...values)}},async run(){const r=sqlite.prepare(sql).run(...values);return {meta:{changes:Number(r.changes)}}}});
+globalThis.__env={DB:{prepare:adapt,async batch(items){sqlite.exec('BEGIN');try{const out=[];for(const item of items)out.push(await item.run());sqlite.exec('COMMIT');return out}catch(e){sqlite.exec('ROLLBACK');throw e}}},DIAGNOSTICS_OWNER_EMAIL:'owner@example.test'};
+const moduleUrl=source=>'data:text/javascript;base64,'+Buffer.from(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.ES2022,target:ts.ScriptTarget.ES2022}}).outputText).toString('base64');
+const sessionUrl=moduleUrl(readFileSync('app/lib/session.ts','utf8')),diagUrl=moduleUrl(readFileSync('app/lib/diagnostics.ts','utf8'));
+const source=readFileSync('app/api/diagnostics/route.ts','utf8').replace("import {env} from 'cloudflare:workers';","const env=globalThis.__env;").replace('../../lib/session',sessionUrl).replace('../../lib/diagnostics',diagUrl);
+const api=await import(moduleUrl(source)),id='a'.repeat(32),origin='https://test.invalid';
+sqlite.prepare('INSERT INTO rooms(id,token_hash,owner,guest,updated,expires,owner_seen,guest_seen) VALUES (?,?,?,?,?,?,?,?)').run(id,'b'.repeat(64),'owner','guest',Date.now(),Date.now()+86400000,Date.now(),Date.now());
+function req(uid,body,extra={}){return new Request(origin+'/api/diagnostics',{method:body?'POST':'GET',headers:{...(uid?{'oai-authenticated-user-id':uid,'oai-authenticated-user-email':uid+'@example.test'}:{}),...(body?{'Content-Type':'application/json',Origin:origin}:{}),...extra},body:body?JSON.stringify(body):undefined})}
+const report={room:id,records:[{code:'playback_stalled',details:{time:35,reason:'seeking',filename:'private.mkv',path:'/secret',sdp:'sensitive',credential:'secret',subtitle:'private text',rtt:Infinity}}]};
+assert.equal((await api.POST(req(null,report))).status,401);assert.equal((await api.POST(req('outsider',report))).status,403);assert.equal((await api.POST(req('guest',report,{Origin:'https://evil.invalid'}))).status,403);
+assert.equal((await api.POST(req('guest',report))).status,200);assert.equal((await api.GET(req('guest'))).status,403);assert.equal((await api.GET(req(null))).status,401);
+const results=await(await api.GET(req('owner'))).json();assert.equal(results.records[0].role,'guest');assert.deepEqual(results.records[0].details,{build:'2026-11-11.1',time:35,reason:'seeking'});assert(!JSON.stringify(results).includes('private'));
+assert.equal((await api.POST(req('owner',{room:id,records:[{code:'arbitrary-secret',details:{}}]}))).status,400);
+for(let n=0;n<3;n++)await api.POST(req('owner',{room:id,records:Array.from({length:20},()=>({code:'rtc_sample',details:{connection:'connected'}}))}));assert.equal((await api.POST(req('owner',report))).status,429);
+delete globalThis.__env.DIAGNOSTICS_OWNER_EMAIL;assert.equal((await api.GET(req('owner'))).status,403,'Missing owner configuration fails closed');
+const {mediaMatch,movieDuration}=await import(moduleUrl(readFileSync('app/lib/room-response.ts','utf8')));assert(mediaMatch('1:a:7200000','2:b:7201000'));assert(!mediaMatch('1:a:7200000','2:b:7202001'));assert(!mediaMatch(null,null));assert.equal(movieDuration('bad'),0);
+console.log('PASS: owner-only durable reports, member-only writes, origin checks, privacy redaction, bounds/rate limits, fail-closed owner configuration and runtime matching.');
